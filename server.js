@@ -22,7 +22,11 @@ function log(level, sid, msg) {
 
 const app      = express();
 const upload   = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
-const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
+const anthropic = process.env.ANTHROPIC_AUTH_TOKEN
+  ? new Anthropic({ authToken: process.env.ANTHROPIC_AUTH_TOKEN })
+  : process.env.ANTHROPIC_API_KEY
+    ? new Anthropic()
+    : null;
 
 app.post(
   '/api/merge-photoshop',
@@ -227,7 +231,7 @@ app.post('/api/color-analyze', express.json({ limit: '5mb' }), async (req, res) 
   const sid = randomBytes(4).toString('hex');
 
   if (!anthropic) {
-    return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set. Set it in your terminal before starting the server.' });
+    return res.status(503).json({ error: 'No Anthropic credentials configured in .env' });
   }
 
   const { image } = req.body;
