@@ -12,36 +12,43 @@ let cvPromise = null;
 
 function loadCV() {
   if (cvPromise) return cvPromise;
+  let step = 'init';
   cvPromise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       cvPromise = null;
-      reject(new Error('OpenCV WASM init timed out — try refreshing'));
+      reject(new Error(`OpenCV timed out at step: ${step}`));
     }, 60000);
 
-    // Must be set before the script runs so Emscripten picks up the callback
     self.Module = {
       onRuntimeInitialized() {
+        step = 'wasm-ready';
         clearTimeout(timeout);
         resolve(self.cv);
       },
     };
 
-    // Use fetch + new Function instead of importScripts — works in both
-    // classic and module worker contexts (Vite dev mode may use module workers)
+    step = 'fetching';
+    self.postMessage({ type: 'progress', progress: 5, label: 'Fetching OpenCV…' });
+
     fetch(OPENCV_URL)
       .then(r => {
-        if (!r.ok) throw new Error(`Could not load opencv.js (HTTP ${r.status})`);
+        if (!r.ok) throw new Error(`HTTP ${r.status} fetching opencv.js`);
+        step = 'reading';
+        self.postMessage({ type: 'progress', progress: 7, label: 'Reading OpenCV…' });
         return r.text();
       })
       .then(code => {
-        // Call with self as 'this' so the UMD root.cv = factory() lands on self.cv
+        step = 'executing';
+        self.postMessage({ type: 'progress', progress: 9, label: 'Initialising WASM…' });
+        // null out module/define so the UMD worker branch fires (root.cv = factory())
         // eslint-disable-next-line no-new-func
-        (new Function(code)).call(self);
+        (new Function('module', 'define', code)).call(self, void 0, void 0);
+        step = 'wasm-init';
       })
       .catch(e => {
         clearTimeout(timeout);
         cvPromise = null;
-        reject(e);
+        reject(new Error(`OpenCV load failed at [${step}]: ${e.message}`));
       });
   });
   return cvPromise;
