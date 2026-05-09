@@ -109,7 +109,7 @@ async function readExif(file) {
 async function detectBracketGroups(files) {
   // Only accept images
   const imageFiles = [...files].filter(f =>
-    /\.(jpe?g|png|tiff?)$/i.test(f.name) || f.type.startsWith('image/')
+    /\.(jpe?g|png|tiff?|cr[23]|nef|arw|dng|raf|rw2)$/i.test(f.name) || f.type.startsWith('image/')
   );
 
   if (imageFiles.length < 2) return { groups: [], ungrouped: imageFiles };

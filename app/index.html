@@ -30,7 +30,7 @@
   <section id="step-import" class="step active">
     <div class="import-zone" id="import-zone">
       <!-- Single input: no webkitdirectory so the OS picker lets you pick files OR navigate into a folder and select all -->
-      <input type="file" id="file-picker" multiple accept="image/jpeg,image/jpg,image/png,image/tiff" style="display:none" />
+      <input type="file" id="file-picker" multiple accept="image/jpeg,image/jpg,image/png,image/tiff,.cr3,.cr2,.nef,.arw,.dng,.raf,.rw2" style="display:none" />
       <div class="import-icon">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
       </div>
@@ -41,7 +41,7 @@
         Choose Files
       </button>
       <div class="import-hint">
-        Accepts JPEG &amp; PNG · groups sets of 3 by timestamp &amp; exposure · drag a folder straight onto this zone
+        Accepts JPEG, PNG &amp; RAW (CR3, CR2, NEF, ARW, DNG) · groups sets of 3 by timestamp &amp; exposure · drag a folder straight onto this zone
       </div>
     </div>
   </section>

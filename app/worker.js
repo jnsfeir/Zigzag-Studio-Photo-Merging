@@ -54,9 +54,56 @@ function loadCV() {
   return cvPromise;
 }
 
+// ── RAW file detection & embedded JPEG extraction ────────────────────────────
+function isRawBuffer(buf) {
+  if (buf.byteLength < 8) return false;
+  const b = new Uint8Array(buf);
+  // ISOBMFF (CR3): "ftyp" at offset 4
+  if (b[4]===0x66 && b[5]===0x74 && b[6]===0x79 && b[7]===0x70) return true;
+  // TIFF-based RAW (CR2, NEF, ARW, DNG): II* or MM*
+  if (b[0]===0x49 && b[1]===0x49 && b[2]===0x2A && b[3]===0x00) return true;
+  if (b[0]===0x4D && b[1]===0x4D && b[2]===0x00 && b[3]===0x2A) return true;
+  return false;
+}
+
+// Scans the buffer for the largest embedded JPEG (Canon full-res preview).
+// Returns an ArrayBuffer slice or null.
+function extractLargestJpeg(buf) {
+  const bytes = new Uint8Array(buf);
+  const limit = Math.min(bytes.length, 40 * 1024 * 1024); // scan first 40 MB
+  let bestStart = -1, bestLen = 0;
+  let i = 0;
+  while (i < limit - 3) {
+    if (bytes[i] === 0xFF && bytes[i+1] === 0xD8 && bytes[i+2] === 0xFF) {
+      let j = i + 2;
+      while (j < limit - 1) {
+        if (bytes[j] === 0xFF && bytes[j+1] === 0xD9) { j += 2; break; }
+        j++;
+      }
+      const len = j - i;
+      if (len > bestLen && len > 100 * 1024) { // ignore thumbnails <100 KB
+        bestLen = len;
+        bestStart = i;
+      }
+      i = j;
+    } else {
+      i++;
+    }
+  }
+  return bestStart >= 0 ? buf.slice(bestStart, bestStart + bestLen) : null;
+}
+
 // ── Image decode ──────────────────────────────────────────────────────────────
 async function bufToMat(cv, buf) {
-  const bitmap = await createImageBitmap(new Blob([buf]));
+  let blob;
+  if (isRawBuffer(buf)) {
+    const jpegBuf = extractLargestJpeg(buf);
+    if (!jpegBuf) throw new Error('Could not find embedded JPEG in RAW file.');
+    blob = new Blob([jpegBuf], { type: 'image/jpeg' });
+  } else {
+    blob = new Blob([buf]);
+  }
+  const bitmap = await createImageBitmap(blob);
   const w = bitmap.width, h = bitmap.height;
   const canvas = new OffscreenCanvas(w, h);
   canvas.getContext('2d').drawImage(bitmap, 0, 0);
