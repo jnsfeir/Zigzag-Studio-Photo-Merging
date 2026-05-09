@@ -5,3 +5,4 @@ dist/
 .DS_Store
 Thumbs.db
 app/public/opencv.js
+logs/

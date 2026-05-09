@@ -1,10 +1,22 @@
 import express from 'express';
 import multer from 'multer';
-import { execFileSync } from 'child_process';
-import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'fs';
-import { join } from 'path';
+import { spawnSync } from 'child_process';
+import { writeFileSync, readFileSync, appendFileSync, mkdirSync, rmSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
+import { fileURLToPath } from 'url';
+
+const ROOT    = dirname(fileURLToPath(import.meta.url));
+const LOG_DIR = join(ROOT, 'logs');
+const LOG_FILE = join(LOG_DIR, 'bridge.log');
+mkdirSync(LOG_DIR, { recursive: true });
+
+function log(level, sessionId, msg) {
+  const line = `[${new Date().toISOString()}] [${level}] [${sessionId}] ${msg}`;
+  console.log(line);
+  try { appendFileSync(LOG_FILE, line + '\n'); } catch {}
+}
 
 const app    = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
@@ -17,9 +29,10 @@ app.post(
     { name: 'over',   maxCount: 1 },
   ]),
   async (req, res) => {
-    const sessionId = randomBytes(8).toString('hex');
+    const sessionId = randomBytes(6).toString('hex');
     const tmpDir    = join(tmpdir(), `ps-merge-${sessionId}`);
     mkdirSync(tmpDir, { recursive: true });
+    log('INFO', sessionId, `Request received — tmpDir: ${tmpDir}`);
 
     try {
       const slots     = ['under', 'normal', 'over'];
@@ -28,12 +41,14 @@ app.post(
       for (const slot of slots) {
         const uploaded = req.files[slot]?.[0];
         if (!uploaded) {
+          log('ERROR', sessionId, `Missing file slot: ${slot}`);
           res.status(400).json({ error: `Missing file: ${slot}` });
           return;
         }
         const ext   = (uploaded.originalname.split('.').pop() || 'jpg').toLowerCase();
         const fPath = join(tmpDir, `${slot}.${ext}`);
         writeFileSync(fPath, uploaded.buffer);
+        log('INFO', sessionId, `Saved ${slot}: ${uploaded.originalname} (${(uploaded.buffer.length / 1024 / 1024).toFixed(1)} MB) → ${fPath}`);
         filePaths.push(fPath.replace(/\\/g, '/'));
       }
 
@@ -43,27 +58,53 @@ app.post(
 
       writeFileSync(jsxPath, buildJsx(filePaths, outputPath));
       writeFileSync(ps1Path, buildPs1(jsxPath.replace(/\\/g, '/')));
+      log('INFO', sessionId, `Scripts written — jsx: ${jsxPath}  ps1: ${ps1Path}`);
 
-      execFileSync('powershell.exe', [
+      log('INFO', sessionId, 'Spawning PowerShell…');
+      const ps = spawnSync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
         '-File', ps1Path,
-      ], { timeout: 240_000 });
+      ], { timeout: 240_000, encoding: 'utf8' });
+
+      const stdout = (ps.stdout || '').trim();
+      const stderr = (ps.stderr || '').trim();
+      if (stdout) log('PS-OUT', sessionId, stdout);
+      if (stderr) log('PS-ERR', sessionId, stderr);
+      if (ps.error) log('SPAWN-ERR', sessionId, ps.error.message);
+      log('INFO', sessionId, `PowerShell exit code: ${ps.status}`);
+
+      // Preserve a permanent copy of the PS output for this session
+      const psLogPath = join(LOG_DIR, `session-${sessionId}.txt`);
+      writeFileSync(psLogPath,
+        `=== PowerShell stdout ===\n${stdout}\n\n=== PowerShell stderr ===\n${stderr}\n\nExit code: ${ps.status}\n`
+      );
+      log('INFO', sessionId, `Full PS output saved → ${psLogPath}`);
+
+      if (ps.status !== 0) {
+        // Also check for error.txt written by ExtendScript
+        const extErrFile = outputPath + '.error.txt';
+        const extDetail  = existsSync(extErrFile) ? readFileSync(extErrFile, 'utf8').trim() : '';
+        const detail = extDetail || stderr || `PowerShell exited with code ${ps.status}`;
+        throw new Error(detail);
+      }
 
       if (!existsSync(outputPath)) {
-        const errFile = outputPath + '.error.txt';
-        const detail  = existsSync(errFile) ? readFileSync(errFile, 'utf8') : 'no output file was created';
+        const extErrFile = outputPath + '.error.txt';
+        const detail     = existsSync(extErrFile) ? readFileSync(extErrFile, 'utf8').trim() : 'no output file was created';
         throw new Error(detail);
       }
 
       const jpeg = readFileSync(outputPath);
+      log('INFO', sessionId, `Success — JPEG size: ${(jpeg.length / 1024).toFixed(0)} KB`);
       res.setHeader('Content-Type', 'image/jpeg');
       res.send(jpeg);
 
     } catch (err) {
-      console.error('[PS Bridge]', err.message);
+      log('ERROR', sessionId, `Merge failed: ${err.message}`);
       if (!res.headersSent) res.status(500).json({ error: err.message });
     } finally {
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      log('INFO', sessionId, 'Temp dir cleaned up');
     }
   },
 );
@@ -109,7 +150,7 @@ $running = Get-Process -Name "Photoshop" -ErrorAction SilentlyContinue
 if (-not $running) {
   $psExe = $null
 
-  # 1) Try registry (works for all recent PS versions)
+  # 1) Registry
   $regKey = "HKLM:\\SOFTWARE\\Adobe\\Photoshop"
   if (Test-Path $regKey) {
     $sub = Get-ChildItem $regKey -ErrorAction SilentlyContinue |
@@ -123,7 +164,7 @@ if (-not $running) {
     }
   }
 
-  # 2) Fallback: scan Program Files for any "Adobe Photoshop*" folder
+  # 2) Scan Program Files
   if (-not $psExe) {
     $dirs = Get-ChildItem "${env:ProgramFiles}\\Adobe" -Filter "Adobe Photoshop*" -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending
@@ -143,9 +184,15 @@ if (-not $running) {
   }
 }
 
+Write-Host "Connecting to Photoshop COM..."
 $ps = New-Object -ComObject Photoshop.Application
+Write-Host "Connected. Running ExtendScript..."
 $ps.DoJavaScriptFile('${jsxPath}')
+Write-Host "ExtendScript completed."
 `;
 }
 
-app.listen(3001, () => console.log('Photoshop bridge ready → http://localhost:3001'));
+app.listen(3001, () => {
+  log('INFO', 'startup', `Photoshop bridge ready → http://localhost:3001`);
+  log('INFO', 'startup', `Logs → ${LOG_FILE}`);
+});
