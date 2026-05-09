@@ -1,7 +1,7 @@
 // Web Worker — OpenCV HDR merge with flambient pipeline
 // Flambient = highlight-safe WB → clean Mertens blend → shadow lift + warmth curve
 
-const OPENCV_URL = 'https://docs.opencv.org/4.8.0/opencv.js';
+const OPENCV_URL = '/opencv.js';
 
 function post(type, extra) { self.postMessage({ type, ...extra }); }
 function progress(pct, label) { post('progress', { progress: pct, label }); }
@@ -12,16 +12,17 @@ let cvPromise = null;
 
 function loadCV() {
   if (cvPromise) return cvPromise;
-  cvPromise = new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('OpenCV load timeout')), 45000);
-    self.Module = {
-      onRuntimeInitialized() {
-        clearTimeout(timeout);
-        resolve(self.cv);
-      },
-    };
-    try { importScripts(OPENCV_URL); } catch (e) { reject(e); }
-  });
+  cvPromise = (async () => {
+    try {
+      importScripts(OPENCV_URL);
+      // OpenCV.js 4.8 exports a factory function — call it and await the thenable
+      const instance = await cv();
+      return instance;
+    } catch (e) {
+      cvPromise = null; // allow retry
+      throw e;
+    }
+  })();
   return cvPromise;
 }
 
@@ -99,7 +100,10 @@ function mergeMertens(cv, mats) {
   const vec = new cv.MatVector();
   mats.forEach(m => vec.push_back(m));
 
-  const merger  = cv.MergeMertens.create(0.0, 0.6, 1.0);
+  const merger = new cv.MergeMertens();
+  merger.setContrastWeight(0.0);
+  merger.setSaturationWeight(0.6);
+  merger.setExposureWeight(1.0);
   const fused32 = new cv.Mat();
   merger.process(vec, fused32);
   merger.delete();
