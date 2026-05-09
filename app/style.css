@@ -290,6 +290,21 @@ header {
 }
 .group-ps-btn:hover { background: #2689c8; }
 
+.group-ai-btn {
+  flex: 0 0 auto;
+  background: linear-gradient(135deg, #6c3fc5, #9b47d9);
+  color: #fff;
+  border: none;
+  border-radius: var(--rsm);
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  letter-spacing: 0.04em;
+}
+.group-ai-btn:hover { opacity: 0.85; }
+
 .section-label {
   font-size: 11px;
   font-weight: 700;

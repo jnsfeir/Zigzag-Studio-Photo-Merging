@@ -2,7 +2,7 @@ import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import express from 'express';
 import multer from 'multer';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { writeFileSync, readFileSync, appendFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { tmpdir } from 'os';
@@ -18,6 +18,81 @@ function log(level, sid, msg) {
   const line = `[${new Date().toISOString()}] [${level}] [${sid}] ${msg}`;
   console.log(line);
   try { appendFileSync(LOG_FILE, line + '\n'); } catch {}
+}
+
+// ── MCP client (JSON-RPC 2.0 over stdio) ─────────────────────────────────────
+class McpClient {
+  constructor() {
+    this.proc    = null;
+    this.pending = new Map();
+    this.msgId   = 1;
+    this.buffer  = '';
+  }
+
+  start() {
+    this.proc = spawn('npx', ['-y', '@alisaitteke/photoshop-mcp'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env:   { ...process.env, LOG_LEVEL: '0' },
+      shell: false,
+    });
+    this.proc.stdout.setEncoding('utf8');
+    this.proc.stdout.on('data', chunk => {
+      this.buffer += chunk;
+      const lines = this.buffer.split('\n');
+      this.buffer  = lines.pop();
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const msg = JSON.parse(t);
+          if (msg.id != null && this.pending.has(msg.id)) {
+            const { resolve, reject } = this.pending.get(msg.id);
+            this.pending.delete(msg.id);
+            if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+            else           resolve(msg.result);
+          }
+        } catch {}
+      }
+    });
+    this.proc.stderr.on('data', () => {});
+  }
+
+  _send(obj) { this.proc.stdin.write(JSON.stringify(obj) + '\n'); }
+
+  _request(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      const id = this.msgId++;
+      this.pending.set(id, { resolve, reject });
+      this._send({ jsonrpc: '2.0', id, method, params });
+      setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        reject(new Error(`MCP timeout: ${method}`));
+      }, 60_000);
+    });
+  }
+
+  async initialize() {
+    await this._request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'zigzag-bridge', version: '1.0' },
+    });
+    this._send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
+  }
+
+  async listTools() {
+    const r = await this._request('tools/list');
+    return r.tools || [];
+  }
+
+  async callTool(name, args = {}) {
+    return this._request('tools/call', { name, arguments: args });
+  }
+
+  stop() {
+    try { this.proc?.stdin.end(); this.proc?.kill(); } catch {}
+  }
 }
 
 const app      = express();
@@ -286,6 +361,129 @@ Rules: r/g/b_scale range 0.85-1.15 only. brightness/contrast/saturation -30 to +
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── AI + Photoshop MCP merge ──────────────────────────────────────────────────
+app.post(
+  '/api/merge-ai',
+  upload.fields([
+    { name: 'under',  maxCount: 1 },
+    { name: 'normal', maxCount: 1 },
+    { name: 'over',   maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const sid    = randomBytes(6).toString('hex');
+    const tmpDir = join(tmpdir(), `ai-merge-${sid}`);
+    mkdirSync(tmpDir, { recursive: true });
+    log('INFO', sid, `AI merge request — tmpDir: ${tmpDir}`);
+
+    let mcp = null;
+    try {
+      if (!anthropic) {
+        return res.status(503).json({ error: 'No Anthropic credentials configured in .env' });
+      }
+
+      const filePaths = {};
+      for (const slot of ['under', 'normal', 'over']) {
+        const uploaded = req.files[slot]?.[0];
+        if (!uploaded) return res.status(400).json({ error: `Missing file: ${slot}` });
+        const ext   = (uploaded.originalname.split('.').pop() || 'jpg').toLowerCase();
+        const fPath = join(tmpDir, `${slot}.${ext}`).replace(/\\/g, '/');
+        writeFileSync(fPath, uploaded.buffer);
+        filePaths[slot] = fPath;
+        log('INFO', sid, `Saved ${slot}: ${fPath}`);
+      }
+      const outputPath = join(tmpDir, 'merged.jpg').replace(/\\/g, '/');
+
+      mcp = new McpClient();
+      mcp.start();
+      log('INFO', sid, 'MCP started — initializing…');
+      await mcp.initialize();
+
+      const mcpTools = await mcp.listTools();
+      log('INFO', sid, `MCP tools (${mcpTools.length}): ${mcpTools.map(t => t.name).join(', ')}`);
+
+      const anthropicTools = mcpTools.map(t => ({
+        name:         t.name,
+        description:  t.description || t.name,
+        input_schema: t.inputSchema || { type: 'object', properties: {} },
+      }));
+
+      const messages = [{
+        role: 'user',
+        content: `You are controlling Adobe Photoshop via MCP tools to merge 3 bracketed exposures using the flambient technique (Auto-Blend Layers — Stack Images mode).
+
+File paths (forward-slashes, already on disk):
+  under:   ${filePaths.under}
+  normal:  ${filePaths.normal}
+  over:    ${filePaths.over}
+  output:  ${outputPath}
+
+Instructions:
+1. Open all 3 files in Photoshop.
+2. Create a new document matching the normal exposure dimensions (RGB, 72 dpi).
+3. Duplicate each image's active layer into the new document — normal at bottom, under in middle, over on top.
+4. Close the 3 source documents without saving.
+5. In the new document select all layers and run Auto-Blend Layers (Stack Images, seamless tones & colors = true).
+6. Flatten the document.
+7. Save flattened as JPEG quality 10 to: ${outputPath}
+8. Close the document without saving.
+
+When the JPEG is saved, respond with only the word: DONE`,
+      }];
+
+      for (let round = 0; round < 30; round++) {
+        log('INFO', sid, `Claude round ${round + 1}`);
+        const response = await anthropic.messages.create({
+          model:      'claude-sonnet-4-6',
+          max_tokens: 4096,
+          tools:      anthropicTools,
+          messages,
+        });
+        messages.push({ role: 'assistant', content: response.content });
+
+        const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+        if (text.toUpperCase().includes('DONE') || response.stop_reason === 'end_turn') {
+          log('INFO', sid, 'Claude finished');
+          break;
+        }
+        if (response.stop_reason !== 'tool_use') break;
+
+        const toolResults = [];
+        for (const block of response.content) {
+          if (block.type !== 'tool_use') continue;
+          log('INFO', sid, `→ ${block.name} ${JSON.stringify(block.input).slice(0, 200)}`);
+          try {
+            const result = await mcp.callTool(block.name, block.input);
+            const out = result?.content?.[0]?.text ?? JSON.stringify(result);
+            log('INFO', sid, `← ${out.slice(0, 300)}`);
+            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: out });
+          } catch (err) {
+            log('ERROR', sid, `Tool error: ${err.message}`);
+            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error: ${err.message}`, is_error: true });
+          }
+        }
+        messages.push({ role: 'user', content: toolResults });
+      }
+
+      if (!existsSync(outputPath)) {
+        throw new Error('Photoshop did not produce output — make sure Photoshop is open and try again');
+      }
+
+      const jpeg = readFileSync(outputPath);
+      log('INFO', sid, `Success — ${(jpeg.length / 1024).toFixed(0)} KB`);
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.send(jpeg);
+
+    } catch (err) {
+      log('ERROR', sid, `AI merge failed: ${err.message}`);
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    } finally {
+      mcp?.stop();
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      log('INFO', sid, 'Temp dir cleaned up');
+    }
+  },
+);
 
 app.listen(3001, () => {
   log('INFO', 'startup', 'Photoshop bridge ready → http://localhost:3001');

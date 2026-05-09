@@ -305,8 +305,12 @@ function renderGroups(groups) {
       <div class="group-thumbs">${thumbsHtml}</div>
       <div class="group-card-footer">
         <button class="group-merge-btn"
-          data-tip="Merge these 3 exposures into one flambient image">
+          data-tip="Merge these 3 exposures using the browser flambient pipeline">
           Merge This Set
+        </button>
+        <button class="group-ai-btn"
+          data-tip="Let Claude AI orchestrate Photoshop Auto-Blend Layers for maximum quality">
+          AI + PS
         </button>
       </div>`;
 
@@ -314,6 +318,9 @@ function renderGroups(groups) {
       mergeGroup(group, `${group.label} of ${groups.length}`);
     });
 
+    card.querySelector('.group-ai-btn').addEventListener('click', () => {
+      mergeGroupWithAI(group, `${group.label} (AI+PS)`);
+    });
 
     // Revoke object URLs when images load to free memory
     card.querySelectorAll('[data-revoke]').forEach(img => {
@@ -456,6 +463,75 @@ async function mergeGroupWithPhotoshop(group, setLabel = '') {
     clearInterval(ticker);
     showStep(stepGroups);
     alert('Photoshop merge failed: ' + err.message + '\n\nMake sure Photoshop is installed and the bridge server is running (npm run server).');
+  }
+}
+
+// ── AI + Photoshop merge ──────────────────────────────────────────────────────
+async function mergeGroupWithAI(group, setLabel = '') {
+  processingSetLabel.textContent = setLabel.toUpperCase();
+  progressBar.style.width  = '5%';
+  progressLabel.textContent = 'Sending to Claude AI + Photoshop…';
+  showStep(stepProcessing);
+
+  let fakePct  = 10;
+  const ticker = setInterval(() => {
+    if (fakePct < 75) { fakePct += 1; progressBar.style.width = `${fakePct}%`; }
+  }, 2000);
+
+  try {
+    const formData = new FormData();
+    const slots    = ['under', 'normal', 'over'];
+    for (let i = 0; i < 3; i++) {
+      formData.append(slots[i], group.files[i], group.files[i].name);
+    }
+
+    progressLabel.textContent = 'Claude is orchestrating Photoshop — this takes ~60 s…';
+
+    const resp = await fetch('/api/merge-ai', { method: 'POST', body: formData });
+
+    clearInterval(ticker);
+
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({ error: resp.statusText }));
+      throw new Error(body.error || `HTTP ${resp.status}`);
+    }
+
+    progressBar.style.width   = '90%';
+    progressLabel.textContent = 'Loading result…';
+
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = url;
+    });
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+
+    progressBar.style.width = '100%';
+    const imageData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+
+    results.push({ imageData, originalFile: group.files[1], label: `${group.label} (AI+PS)` });
+    currentResult = results.length - 1;
+
+    if (mergeQueue.length > 0) {
+      const next = mergeQueue.shift();
+      mergeGroupWithAI(next, `${next.label} · ${mergeQueue.length} remaining`);
+    } else {
+      showResultStep();
+    }
+
+  } catch (err) {
+    clearInterval(ticker);
+    showStep(stepGroups);
+    alert('AI + Photoshop merge failed: ' + err.message + '\n\nMake sure:\n• Photoshop is open\n• The bridge server is running (npm run server)\n• ANTHROPIC_AUTH_TOKEN is set in .env');
   }
 }
 
