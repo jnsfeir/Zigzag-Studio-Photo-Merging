@@ -1,4 +1,5 @@
-// Pure-JS flambient pipeline — no OpenCV, no WASM, no loading delay
+// Pure-JS flambient pipeline — no OpenCV, no WASM
+// Mertens fusion with blurred weight maps (prevents halos at high-contrast edges)
 
 function post(type, extra) { self.postMessage({ type, ...extra }); }
 function progress(pct, label) { post('progress', { progress: pct, label }); }
@@ -8,15 +9,15 @@ function fail(msg) { post('error', { error: msg }); }
 function isRawBuffer(buf) {
   if (buf.byteLength < 8) return false;
   const b = new Uint8Array(buf);
-  if (b[4]===0x66&&b[5]===0x74&&b[6]===0x79&&b[7]===0x70) return true; // CR3 ISOBMFF
+  if (b[4]===0x66&&b[5]===0x74&&b[6]===0x79&&b[7]===0x70) return true; // CR3
   if (b[0]===0x49&&b[1]===0x49&&b[2]===0x2A&&b[3]===0x00) return true; // TIFF-LE
   if (b[0]===0x4D&&b[1]===0x4D&&b[2]===0x00&&b[3]===0x2A) return true; // TIFF-BE
   return false;
 }
 
 function extractLargestJpeg(buf) {
-  const bytes  = new Uint8Array(buf);
-  const limit  = Math.min(bytes.length, 40 * 1024 * 1024);
+  const bytes = new Uint8Array(buf);
+  const limit = Math.min(bytes.length, 40 * 1024 * 1024);
   let bestStart = -1, bestLen = 0, i = 0;
   while (i < limit - 3) {
     if (bytes[i]===0xFF && bytes[i+1]===0xD8 && bytes[i+2]===0xFF) {
@@ -49,13 +50,12 @@ async function bufToImageData(buf) {
   return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
 }
 
-// ── White balance (highlight-based) ──────────────────────────────────────────
-// Samples top ~15 % brightest pixels; scales R and B toward G mean.
+// ── White balance (conservative highlight-based) ──────────────────────────────
+// Only adjusts if there is a measurable color cast in the highlights.
 function whiteBalance(imageData) {
   const { data, width, height } = imageData;
   const n = width * height;
 
-  // Luminance max (fast — single pass, no sort)
   let maxLum = 0;
   for (let i = 0; i < n; i++) {
     const lum = 0.299 * data[i*4] + 0.587 * data[i*4+1] + 0.114 * data[i*4+2];
@@ -76,8 +76,15 @@ function whiteBalance(imageData) {
   const rMean = rSum / count;
   const gMean = gSum / count;
   const bMean = bSum / count;
-  const rScale = (gMean / Math.max(rMean, 1)) * 1.01;  // tiny red lift for warmth
-  const bScale = (gMean / Math.max(bMean, 1)) * 0.97;  // slight blue compression
+
+  // Only correct if cast is > 5 % — avoids overcorrecting neutral scenes
+  const rRatio = gMean / Math.max(rMean, 1);
+  const bRatio = gMean / Math.max(bMean, 1);
+  if (Math.abs(rRatio - 1) < 0.05 && Math.abs(bRatio - 1) < 0.05) return imageData;
+
+  // Clamp scale to ±25 % to avoid aggressive shifts
+  const rScale = Math.max(0.75, Math.min(1.25, rRatio * 1.01));
+  const bScale = Math.max(0.75, Math.min(1.25, bRatio * 0.97));
 
   const out = new Uint8ClampedArray(data);
   for (let i = 0; i < n; i++) {
@@ -87,43 +94,82 @@ function whiteBalance(imageData) {
   return new ImageData(out, width, height);
 }
 
-// ── Mertens exposure fusion (memory-efficient single-pass) ────────────────────
-// contrast=0, saturation=0.6, exposedness=1.0 — tuned for flambient
-function fuseMertens(imgs) {
-  const { width, height } = imgs[0];
-  const n   = width * height;
-  const d0  = imgs[0].data, d1 = imgs[1].data, d2 = imgs[2].data;
-  const out = new Uint8ClampedArray(n * 4);
-  const INV_SIGMA2 = 1 / (2 * 0.2 * 0.2);   // exposedness Gaussian sigma=0.2
+// ── Weight map ────────────────────────────────────────────────────────────────
+// contrast=0, saturation=0.6, exposedness=1.0 (flambient tuning)
+function computeWeightMap(imageData) {
+  const { data } = imageData;
+  const n = data.length / 4;
+  const weights = new Float32Array(n);
+  const INV_SIGMA2 = 1 / (2 * 0.2 * 0.2);
 
   for (let i = 0; i < n; i++) {
-    const p = i * 4;
+    const r = data[i*4]   / 255;
+    const g = data[i*4+1] / 255;
+    const b = data[i*4+2] / 255;
+    const wExp = Math.exp(-((r-.5)**2 + (g-.5)**2 + (b-.5)**2) * INV_SIGMA2);
+    const mean = (r + g + b) / 3;
+    const wSat = Math.sqrt(((r-mean)**2 + (g-mean)**2 + (b-mean)**2) / 3);
+    weights[i] = Math.pow(Math.max(wExp, 1e-6), 1.0)
+               * Math.pow(Math.max(wSat, 1e-6), 0.6)
+               + 1e-12;
+  }
+  return weights;
+}
 
-    // --- image 0 ---
-    const r0 = d0[p]/255, g0 = d0[p+1]/255, b0 = d0[p+2]/255;
-    const m0 = (r0+g0+b0)/3;
-    const wExp0 = Math.exp(-((r0-.5)**2+(g0-.5)**2+(b0-.5)**2)*INV_SIGMA2);
-    const wSat0 = Math.sqrt(((r0-m0)**2+(g0-m0)**2+(b0-m0)**2)/3);
-    const w0 = Math.pow(Math.max(wExp0,1e-6),1.0) * Math.pow(Math.max(wSat0,1e-6),0.6) + 1e-12;
+// Blur a weight map via OffscreenCanvas CSS blur (GPU-accelerated).
+// Smoothing weight maps prevents halos at high-contrast edges.
+async function blurWeightMap(weights, width, height, sigma) {
+  let maxW = 0;
+  for (let i = 0; i < weights.length; i++) if (weights[i] > maxW) maxW = weights[i];
+  const scale    = maxW > 0 ? 255 / maxW : 1;
+  const invScale = maxW > 0 ? maxW / 255 : 1;
 
-    // --- image 1 ---
-    const r1 = d1[p]/255, g1 = d1[p+1]/255, b1 = d1[p+2]/255;
-    const m1 = (r1+g1+b1)/3;
-    const wExp1 = Math.exp(-((r1-.5)**2+(g1-.5)**2+(b1-.5)**2)*INV_SIGMA2);
-    const wSat1 = Math.sqrt(((r1-m1)**2+(g1-m1)**2+(b1-m1)**2)/3);
-    const w1 = Math.pow(Math.max(wExp1,1e-6),1.0) * Math.pow(Math.max(wSat1,1e-6),0.6) + 1e-12;
+  const imgData = new ImageData(width, height);
+  for (let i = 0; i < weights.length; i++) {
+    const v = Math.round(Math.min(255, weights[i] * scale));
+    imgData.data[i*4] = imgData.data[i*4+1] = imgData.data[i*4+2] = v;
+    imgData.data[i*4+3] = 255;
+  }
 
-    // --- image 2 ---
-    const r2 = d2[p]/255, g2 = d2[p+1]/255, b2 = d2[p+2]/255;
-    const m2 = (r2+g2+b2)/3;
-    const wExp2 = Math.exp(-((r2-.5)**2+(g2-.5)**2+(b2-.5)**2)*INV_SIGMA2);
-    const wSat2 = Math.sqrt(((r2-m2)**2+(g2-m2)**2+(b2-m2)**2)/3);
-    const w2 = Math.pow(Math.max(wExp2,1e-6),1.0) * Math.pow(Math.max(wSat2,1e-6),0.6) + 1e-12;
+  const srcCanvas = new OffscreenCanvas(width, height);
+  srcCanvas.getContext('2d').putImageData(imgData, 0, 0);
 
-    const wSum = w0 + w1 + w2;
-    out[p]   = Math.min(255, (d0[p]   * w0 + d1[p]   * w1 + d2[p]   * w2) / wSum);
-    out[p+1] = Math.min(255, (d0[p+1] * w0 + d1[p+1] * w1 + d2[p+1] * w2) / wSum);
-    out[p+2] = Math.min(255, (d0[p+2] * w0 + d1[p+2] * w1 + d2[p+2] * w2) / wSum);
+  const blurCanvas = new OffscreenCanvas(width, height);
+  const blurCtx    = blurCanvas.getContext('2d');
+  blurCtx.filter   = `blur(${sigma}px)`;
+  blurCtx.drawImage(srcCanvas, 0, 0);
+
+  const blurred = blurCtx.getImageData(0, 0, width, height).data;
+  const result  = new Float32Array(weights.length);
+  for (let i = 0; i < result.length; i++) result[i] = blurred[i*4] * invScale;
+  return result;
+}
+
+// ── Mertens fusion with smooth weight maps ────────────────────────────────────
+async function fuseMertens(imgs) {
+  const { width, height } = imgs[0];
+  const n = width * height;
+
+  // Blur sigma scales with image width — larger images need larger blur radius
+  const sigma = Math.max(8, Math.round(width / 250));
+
+  const rawW = imgs.map(img => computeWeightMap(img));
+  const blurW = await Promise.all(rawW.map(w => blurWeightMap(w, width, height, sigma)));
+
+  // Normalise blurred weights
+  const totalW = new Float32Array(n);
+  for (const w of blurW) for (let i = 0; i < n; i++) totalW[i] += w[i];
+
+  const [d0, d1, d2] = imgs.map(img => img.data);
+  const [w0, w1, w2] = blurW;
+  const out = new Uint8ClampedArray(n * 4);
+
+  for (let i = 0; i < n; i++) {
+    const p  = i * 4;
+    const tw = totalW[i];
+    out[p]   = Math.min(255, (d0[p]   * w0[i] + d1[p]   * w1[i] + d2[p]   * w2[i]) / tw);
+    out[p+1] = Math.min(255, (d0[p+1] * w0[i] + d1[p+1] * w1[i] + d2[p+1] * w2[i]) / tw);
+    out[p+2] = Math.min(255, (d0[p+2] * w0[i] + d1[p+2] * w1[i] + d2[p+2] * w2[i]) / tw);
     out[p+3] = 255;
   }
   return new ImageData(out, width, height);
@@ -149,22 +195,19 @@ function shadowLift(imageData) {
   return new ImageData(out, width, height);
 }
 
-// ── Clarity via OffscreenCanvas blur filter (hardware-accelerated) ────────────
+// ── Clarity (unsharp mask via OffscreenCanvas blur) ───────────────────────────
 function addClarity(imageData) {
-  const { width, height, data } = imageData;
+  const { data, width, height } = imageData;
 
-  // Draw source onto a canvas
   const srcCanvas = new OffscreenCanvas(width, height);
   srcCanvas.getContext('2d').putImageData(imageData, 0, 0);
 
-  // Blur it with CSS blur (browser-native, GPU-accelerated)
   const blurCanvas = new OffscreenCanvas(width, height);
   const blurCtx    = blurCanvas.getContext('2d');
   blurCtx.filter   = 'blur(12px)';
   blurCtx.drawImage(srcCanvas, 0, 0);
   const blurred = blurCtx.getImageData(0, 0, width, height).data;
 
-  // Unsharp mask: result = src * 1.12 - blurred * 0.12
   const out = new Uint8ClampedArray(data.length);
   for (let i = 0; i < data.length; i += 4) {
     out[i]   = Math.min(255, Math.max(0, data[i]   * 1.12 - blurred[i]   * 0.12));
@@ -198,16 +241,19 @@ self.onmessage = async (e) => {
     const wbNormal = whiteBalance(imgNormal);
     const wbOver   = whiteBalance(imgOver);
 
-    progress(35, 'Fusing exposures (flambient)...');
-    const fused = fuseMertens([wbUnder, wbNormal, wbOver]);
+    progress(32, 'Computing weight maps...');
+    // (weight blur happens inside fuseMertens, shown as part of fusion step)
 
-    progress(70, 'Lifting shadows...');
+    progress(38, 'Fusing exposures...');
+    const fused = await fuseMertens([wbUnder, wbNormal, wbOver]);
+
+    progress(72, 'Lifting shadows...');
     const lifted = shadowLift(fused);
 
-    progress(82, 'Adding clarity...');
+    progress(84, 'Adding clarity...');
     const final = addClarity(lifted);
 
-    progress(96, 'Finalizing...');
+    progress(97, 'Finalizing...');
     const buf = final.data.buffer.slice(0);
     progress(100, 'Done');
     self.postMessage({ type: 'result', result: { width, height, data: buf } }, [buf]);
