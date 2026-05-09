@@ -227,6 +227,22 @@ header {
   background: var(--surface2);
   display: block;
 }
+.group-thumb-img.raw-pending {
+  background: var(--surface2);
+  position: relative;
+}
+.group-thumb-img.raw-pending::after {
+  content: 'RAW';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text3);
+  letter-spacing: .08em;
+}
 .group-thumb-meta {
   font-size: 10px;
   color: var(--text3);

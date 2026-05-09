@@ -1,4 +1,5 @@
 import exifr from 'exifr';
+import LibRaw from 'libraw-wasm';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let detectedGroups = [];   // [{files: [under, normal, over], label: string}]
@@ -89,6 +90,50 @@ function getTimestamp(tags) {
   return tags?.DateTimeOriginal?.getTime?.() ??
          tags?.DateTime?.getTime?.()          ??
          null;
+}
+
+// ── RAW file helpers ──────────────────────────────────────────────────────────
+function isRawFile(file) {
+  return /\.(cr[23]|nef|arw|dng|raf|rw2|orf|pef|srw)$/i.test(file.name);
+}
+
+// Decodes a RAW file using LibRaw → full-res sRGB JPEG ArrayBuffer.
+// Falls back to raw bytes (worker will extract embedded JPEG) on error.
+async function decodeRawToBuffer(file) {
+  try {
+    const raw = new LibRaw();
+    const fileBuf = await file.arrayBuffer();
+    await raw.open(new Uint8Array(fileBuf), {
+      outputBps:    8,
+      useCameraWb:  true,
+      outputColor:  1,     // sRGB
+      halfSize:     false,
+      noAutoBright: false,
+      bright:       1.0,
+      userQual:     3,     // AHD interpolation — best quality
+    });
+    const meta   = await raw.metadata();
+    const imgBuf = await raw.imageData();
+    const { width, height } = meta;
+    const pixels = new Uint8Array(imgBuf instanceof ArrayBuffer ? imgBuf : imgBuf.buffer ?? imgBuf);
+
+    // Render sRGB pixel strip → OffscreenCanvas → JPEG blob → ArrayBuffer
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx    = canvas.getContext('2d');
+    const iData  = new ImageData(width, height);
+    for (let i = 0, j = 0; i < width * height * 3; i += 3, j += 4) {
+      iData.data[j]     = pixels[i];
+      iData.data[j + 1] = pixels[i + 1];
+      iData.data[j + 2] = pixels[i + 2];
+      iData.data[j + 3] = 255;
+    }
+    ctx.putImageData(iData, 0, 0);
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.97 });
+    return blob.arrayBuffer();
+  } catch (err) {
+    console.warn(`LibRaw decode failed for ${file.name}, using embedded JPEG fallback:`, err);
+    return file.arrayBuffer();
+  }
 }
 
 // ── EXIF reading ──────────────────────────────────────────────────────────────
@@ -231,16 +276,20 @@ function renderGroups(groups) {
 
     const evLabels = ['−2 EV', '0 EV', '+2 EV'];
     const thumbsHtml = group.files.map((file, i) => {
-      const url = URL.createObjectURL(file);
+      const raw  = isRawFile(file);
+      const url  = raw ? '' : URL.createObjectURL(file);
       const tags = group.tags[i];
       const shutter = formatShutter(tags?.ExposureTime);
       const iso = tags?.ISOSpeedRatings || tags?.ISO;
       const meta = [shutter, iso ? `ISO ${iso}` : ''].filter(Boolean).join(' · ');
       return `
         <div class="group-thumb-item">
-          <img class="group-thumb-img" src="${url}" alt="${evLabels[i]}" data-revoke="${url}" />
+          <img class="group-thumb-img${raw ? ' raw-pending' : ''}"
+               src="${url}" alt="${evLabels[i]}"
+               ${url ? `data-revoke="${url}"` : ''}
+               data-idx="${i}" />
           <div class="group-thumb-ev">${evLabels[i]}</div>
-          <div class="group-thumb-meta">${meta}</div>
+          <div class="group-thumb-meta">${meta}${raw ? ' · RAW' : ''}</div>
         </div>`;
     }).join('');
 
@@ -266,6 +315,20 @@ function renderGroups(groups) {
       img.addEventListener('load', () => URL.revokeObjectURL(img.dataset.revoke), { once: true });
     });
 
+    // Async: load exifr thumbnails for RAW files
+    group.files.forEach((file, i) => {
+      if (!isRawFile(file)) return;
+      const img = card.querySelector(`[data-idx="${i}"]`);
+      if (!img) return;
+      exifr.thumbnail(file).then(bytes => {
+        if (!bytes) return;
+        const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+        img.src = blobUrl;
+        img.classList.remove('raw-pending');
+        img.addEventListener('load', () => URL.revokeObjectURL(blobUrl), { once: true });
+      }).catch(() => {});
+    });
+
     groupsGrid.appendChild(card);
   });
 }
@@ -277,8 +340,14 @@ async function mergeGroup(group, setLabel = '') {
   progressLabel.textContent = 'Preparing…';
   showStep(stepProcessing);
 
+  const hasRaw = group.files.some(isRawFile);
+  if (hasRaw) {
+    progressBar.style.width  = '2%';
+    progressLabel.textContent = 'Decoding RAW files…';
+  }
+
   const [underBuf, normalBuf, overBuf] = await Promise.all(
-    group.files.map(f => f.arrayBuffer())
+    group.files.map(f => isRawFile(f) ? decodeRawToBuffer(f) : f.arrayBuffer())
   );
 
   if (!worker) {

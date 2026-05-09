@@ -13,6 +13,7 @@
   "dependencies": {
     "comlink": "^4.4.2",
     "exifr": "^7.1.3",
+    "libraw-wasm": "^1.1.2",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
   }

@@ -9,6 +9,6 @@ export default defineConfig({
     format: 'iife',
   },
   optimizeDeps: {
-    exclude: ['opencv.js'],
+    exclude: ['opencv.js', 'libraw-wasm'],
   },
 });
