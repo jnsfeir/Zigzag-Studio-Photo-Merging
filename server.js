@@ -164,7 +164,7 @@ if (-not $running) {
     Write-Host "Inner: waiting 12 s..."
     Start-Sleep -Seconds 12
   } else {
-    throw "Photoshop.exe not found — open Photoshop and try again"
+    throw "Photoshop.exe not found - open Photoshop and try again"
   }
 }
 Write-Host "Inner: connecting COM..."
@@ -183,10 +183,10 @@ $taskName   = '${taskName}'
 $innerPath  = '${innerPs1Path.replace(/\\/g, '/')}'
 $outputPath = '${outputPath.replace(/\\/g, '/')}'
 
-# schtasks.exe uses a different RPC path than the PS cmdlets — works from non-interactive processes
-$tr = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \`"$innerPath\`""
+# schtasks.exe uses a different RPC path - works from non-interactive processes
+$tr = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $innerPath"
 Write-Host "Outer: creating task $taskName"
-& schtasks.exe /Create /TN $taskName /TR "$tr" /SC ONCE /ST 00:00 /F /IT 2>&1 | Write-Host
+& schtasks.exe /Create /TN $taskName /TR $tr /SC ONCE /ST 00:00 /F /IT 2>&1 | Write-Host
 if ($LASTEXITCODE -ne 0) { throw "schtasks create failed (exit $LASTEXITCODE)" }
 
 Write-Host "Outer: starting task"
@@ -202,7 +202,7 @@ while (-not (Test-Path $outputPath) -and (Get-Date) -lt $deadline) {
 & schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
 
 if (-not (Test-Path $outputPath)) {
-  throw "Timeout — Photoshop did not produce output within 4 minutes"
+  throw "Timeout - Photoshop did not produce output within 4 minutes"
 }
 Write-Host "Outer: output confirmed"
 `;
