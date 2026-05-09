@@ -66,11 +66,11 @@ function loadCV() {
         // eslint-disable-next-line no-new-func
         (new Function('module', 'define', code)).call(self, void 0, void 0);
 
-        // Emscripten 3.x+ also exposes a cv.ready Promise — use whichever fires first
+        // Emscripten 3.x+ exposes cv as a thenable — wrap in real Promise
         if (self.cv && typeof self.cv.then === 'function') {
-          self.cv.then(() => done()).catch(e => fail('cv.then rejected: ' + e));
+          Promise.resolve(self.cv).then(() => done()).catch(e => fail('cv init error: ' + e));
         } else if (self.cv && self.cv.ready && typeof self.cv.ready.then === 'function') {
-          self.cv.ready.then(() => done()).catch(e => fail('cv.ready rejected: ' + e));
+          Promise.resolve(self.cv.ready).then(() => done()).catch(e => fail('cv.ready error: ' + e));
         } else if (self.cv && self.cv.Mat) {
           done(); // already synchronously ready
         }
