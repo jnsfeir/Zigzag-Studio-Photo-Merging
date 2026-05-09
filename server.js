@@ -103,7 +103,49 @@ try {
 }
 
 function buildPs1(jsxPath) {
-  return `$ps = New-Object -ComObject Photoshop.Application\n$ps.DoJavaScriptFile('${jsxPath}')\n`;
+  return `
+# Launch Photoshop if it is not already running
+$running = Get-Process -Name "Photoshop" -ErrorAction SilentlyContinue
+if (-not $running) {
+  $psExe = $null
+
+  # 1) Try registry (works for all recent PS versions)
+  $regKey = "HKLM:\\SOFTWARE\\Adobe\\Photoshop"
+  if (Test-Path $regKey) {
+    $sub = Get-ChildItem $regKey -ErrorAction SilentlyContinue |
+           Sort-Object Name -Descending | Select-Object -First 1
+    if ($sub) {
+      $appPath = (Get-ItemProperty $sub.PSPath -ErrorAction SilentlyContinue).ApplicationPath
+      if ($appPath) {
+        $exe = Join-Path $appPath "Photoshop.exe"
+        if (Test-Path $exe) { $psExe = $exe }
+      }
+    }
+  }
+
+  # 2) Fallback: scan Program Files for any "Adobe Photoshop*" folder
+  if (-not $psExe) {
+    $dirs = Get-ChildItem "${env:ProgramFiles}\\Adobe" -Filter "Adobe Photoshop*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+    foreach ($d in $dirs) {
+      $exe = Join-Path $d.FullName "Photoshop.exe"
+      if (Test-Path $exe) { $psExe = $exe; break }
+    }
+  }
+
+  if ($psExe) {
+    Write-Host "Launching Photoshop: $psExe"
+    Start-Process $psExe
+    Write-Host "Waiting 12 s for Photoshop to initialise..."
+    Start-Sleep -Seconds 12
+  } else {
+    throw "Photoshop.exe not found. Please open Photoshop manually and try again."
+  }
+}
+
+$ps = New-Object -ComObject Photoshop.Application
+$ps.DoJavaScriptFile('${jsxPath}')
+`;
 }
 
 app.listen(3001, () => console.log('Photoshop bridge ready → http://localhost:3001'));
