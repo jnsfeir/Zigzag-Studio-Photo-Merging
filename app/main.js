@@ -301,13 +301,21 @@ function renderGroups(groups) {
       <div class="group-thumbs">${thumbsHtml}</div>
       <div class="group-card-footer">
         <button class="group-merge-btn"
-          data-tip="Merge these 3 exposures into one flambient image">
-          Merge This Set
+          data-tip="Merge with the browser's built-in flambient pipeline">
+          Merge (Browser)
+        </button>
+        <button class="group-ps-btn"
+          data-tip="Send to Photoshop — opens the 3 exposures in PS and runs Auto-Blend Layers for a professional HDR stack">
+          Merge with PS
         </button>
       </div>`;
 
     card.querySelector('.group-merge-btn').addEventListener('click', () => {
       mergeGroup(group, `${group.label} of ${groups.length}`);
+    });
+
+    card.querySelector('.group-ps-btn').addEventListener('click', () => {
+      mergeGroupWithPhotoshop(group, `${group.label} of ${groups.length}`);
     });
 
     // Revoke object URLs when images load to free memory
@@ -387,6 +395,77 @@ async function mergeGroup(group, setLabel = '') {
 
   worker.postMessage({ type: 'merge', under: underBuf, normal: normalBuf, over: overBuf },
     [underBuf, normalBuf, overBuf]);
+}
+
+// ── Photoshop merge ───────────────────────────────────────────────────────────
+async function mergeGroupWithPhotoshop(group, setLabel = '') {
+  processingSetLabel.textContent = setLabel.toUpperCase();
+  progressBar.style.width  = '5%';
+  progressLabel.textContent = 'Uploading to Photoshop bridge…';
+  showStep(stepProcessing);
+
+  // Fake progress ticker while PS is working (no real-time feedback from COM)
+  let fakePct  = 20;
+  const ticker = setInterval(() => {
+    if (fakePct < 80) { fakePct += 2; progressBar.style.width = `${fakePct}%`; }
+  }, 1500);
+
+  try {
+    const formData = new FormData();
+    const slots    = ['under', 'normal', 'over'];
+    for (let i = 0; i < 3; i++) {
+      formData.append(slots[i], group.files[i], group.files[i].name);
+    }
+
+    progressLabel.textContent = 'Photoshop is merging — this may take 30–60 s…';
+
+    const resp = await fetch('/api/merge-photoshop', { method: 'POST', body: formData });
+
+    clearInterval(ticker);
+
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({ error: resp.statusText }));
+      throw new Error(body.error || `HTTP ${resp.status}`);
+    }
+
+    progressBar.style.width   = '92%';
+    progressLabel.textContent = 'Loading result…';
+
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = url;
+    });
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+
+    progressBar.style.width = '100%';
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    results.push({ imageData, originalFile: group.files[1], label: `${group.label} (Photoshop)` });
+    currentResult = results.length - 1;
+
+    if (mergeQueue.length > 0) {
+      const next = mergeQueue.shift();
+      mergeGroupWithPhotoshop(next, `${next.label} · ${mergeQueue.length} remaining`);
+    } else {
+      showResultStep();
+    }
+
+  } catch (err) {
+    clearInterval(ticker);
+    showStep(stepGroups);
+    alert('Photoshop merge failed: ' + err.message + '\n\nMake sure Photoshop is installed and the bridge server is running (npm run server).');
+  }
 }
 
 // ── Merge all ─────────────────────────────────────────────────────────────────

@@ -276,6 +276,20 @@ header {
 }
 .group-merge-btn:hover { background: var(--accent2); }
 
+.group-ps-btn {
+  flex: 1;
+  background: #1c6ea4;
+  color: #fff;
+  border: none;
+  border-radius: var(--rsm);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.group-ps-btn:hover { background: #2689c8; }
+
 .section-label {
   font-size: 11px;
   font-weight: 700;
