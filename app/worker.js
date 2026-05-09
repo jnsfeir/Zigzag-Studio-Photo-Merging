@@ -15,22 +15,34 @@ function loadCV() {
   cvPromise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       cvPromise = null;
-      reject(new Error('OpenCV load timeout'));
+      reject(new Error('OpenCV WASM init timed out — try refreshing'));
     }, 60000);
-    // Must set self.Module BEFORE importScripts so the UMD factory picks it up
+
+    // Must be set before the script runs so Emscripten picks up the callback
     self.Module = {
       onRuntimeInitialized() {
         clearTimeout(timeout);
         resolve(self.cv);
       },
     };
-    try {
-      importScripts(OPENCV_URL);
-    } catch (e) {
-      clearTimeout(timeout);
-      cvPromise = null;
-      reject(e);
-    }
+
+    // Use fetch + new Function instead of importScripts — works in both
+    // classic and module worker contexts (Vite dev mode may use module workers)
+    fetch(OPENCV_URL)
+      .then(r => {
+        if (!r.ok) throw new Error(`Could not load opencv.js (HTTP ${r.status})`);
+        return r.text();
+      })
+      .then(code => {
+        // Call with self as 'this' so the UMD root.cv = factory() lands on self.cv
+        // eslint-disable-next-line no-new-func
+        (new Function(code)).call(self);
+      })
+      .catch(e => {
+        clearTimeout(timeout);
+        cvPromise = null;
+        reject(e);
+      });
   });
   return cvPromise;
 }
