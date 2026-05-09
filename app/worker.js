@@ -10,46 +10,73 @@ function fail(msg) { post('error', { error: msg }); }
 // ── OpenCV loader ─────────────────────────────────────────────────────────────
 let cvPromise = null;
 
+async function fetchWithProgress(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} loading opencv.js`);
+  const total = parseInt(resp.headers.get('content-length') || '0', 10);
+  if (!total || !resp.body) return resp.text();
+
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const pct = Math.round((received / total) * 100);
+    self.postMessage({ type: 'progress', progress: 5 + Math.round(pct * 0.08), label: `Downloading OpenCV… ${pct}%` });
+  }
+  const all = new Uint8Array(received);
+  let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  return new TextDecoder().decode(all);
+}
+
 function loadCV() {
   if (cvPromise) return cvPromise;
-  let step = 'init';
   cvPromise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       cvPromise = null;
-      reject(new Error(`OpenCV timed out at step: ${step}`));
-    }, 60000);
+      reject(new Error('OpenCV WASM never initialised — check browser console for errors'));
+    }, 90000);
 
+    const done = () => { clearTimeout(timeout); clearInterval(ticker); resolve(self.cv); };
+    const fail = (msg) => { clearTimeout(timeout); clearInterval(ticker); cvPromise = null; reject(new Error(msg)); };
+
+    // Fake progress ticker while WASM compiles (no real API for this)
+    let fakePct = 14;
+    const ticker = setInterval(() => {
+      if (fakePct < 14) return;
+      fakePct = Math.min(fakePct + 1, 14);
+      self.postMessage({ type: 'progress', progress: fakePct, label: 'Compiling WASM…' });
+    }, 800);
+
+    // Emscripten ≤3.x callback pattern
     self.Module = {
-      onRuntimeInitialized() {
-        step = 'wasm-ready';
-        clearTimeout(timeout);
-        resolve(self.cv);
-      },
+      onRuntimeInitialized() { done(); },
+      onAbort(reason) { fail('WASM aborted: ' + reason); },
     };
 
-    step = 'fetching';
-    self.postMessage({ type: 'progress', progress: 5, label: 'Fetching OpenCV…' });
-
-    fetch(OPENCV_URL)
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status} fetching opencv.js`);
-        step = 'reading';
-        self.postMessage({ type: 'progress', progress: 7, label: 'Reading OpenCV…' });
-        return r.text();
-      })
+    fetchWithProgress(OPENCV_URL)
       .then(code => {
-        step = 'executing';
-        self.postMessage({ type: 'progress', progress: 9, label: 'Initialising WASM…' });
-        // null out module/define so the UMD worker branch fires (root.cv = factory())
+        self.postMessage({ type: 'progress', progress: 13, label: 'Executing OpenCV script…' });
+        // Pass undefined for module/define so UMD takes the worker/else branch
+        // and assigns root.cv = factory() where root = this = self
         // eslint-disable-next-line no-new-func
         (new Function('module', 'define', code)).call(self, void 0, void 0);
-        step = 'wasm-init';
+
+        // Emscripten 3.x+ also exposes a cv.ready Promise — use whichever fires first
+        if (self.cv && typeof self.cv.then === 'function') {
+          self.cv.then(() => done()).catch(e => fail('cv.then rejected: ' + e));
+        } else if (self.cv && self.cv.ready && typeof self.cv.ready.then === 'function') {
+          self.cv.ready.then(() => done()).catch(e => fail('cv.ready rejected: ' + e));
+        } else if (self.cv && self.cv.Mat) {
+          done(); // already synchronously ready
+        }
+        // otherwise wait for onRuntimeInitialized above
       })
-      .catch(e => {
-        clearTimeout(timeout);
-        cvPromise = null;
-        reject(new Error(`OpenCV load failed at [${step}]: ${e.message}`));
-      });
+      .catch(e => fail('Fetch failed: ' + e.message));
   });
   return cvPromise;
 }
@@ -203,7 +230,6 @@ self.onmessage = async (e) => {
   const { under, normal, over } = e.data;
 
   try {
-    progress(5, 'Loading OpenCV…');
     const cv = await loadCV();
 
     progress(15, 'Decoding images…');
