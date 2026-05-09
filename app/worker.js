@@ -10,73 +10,46 @@ function fail(msg) { post('error', { error: msg }); }
 // ── OpenCV loader ─────────────────────────────────────────────────────────────
 let cvPromise = null;
 
-async function fetchWithProgress(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} loading opencv.js`);
-  const total = parseInt(resp.headers.get('content-length') || '0', 10);
-  if (!total || !resp.body) return resp.text();
-
-  const reader = resp.body.getReader();
-  const chunks = [];
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    const pct = Math.round((received / total) * 100);
-    self.postMessage({ type: 'progress', progress: 5 + Math.round(pct * 0.08), label: `Downloading OpenCV… ${pct}%` });
-  }
-  const all = new Uint8Array(received);
-  let off = 0;
-  for (const c of chunks) { all.set(c, off); off += c.length; }
-  return new TextDecoder().decode(all);
-}
-
 function loadCV() {
   if (cvPromise) return cvPromise;
   cvPromise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       cvPromise = null;
-      reject(new Error('OpenCV WASM never initialised — check browser console for errors'));
+      reject(new Error('OpenCV WASM timed out — try refreshing'));
     }, 90000);
+
+    let tickPct = 10;
+    const ticker = setInterval(() => {
+      if (tickPct < 14) {
+        tickPct++;
+        self.postMessage({ type: 'progress', progress: tickPct, label: 'Compiling WASM…' });
+      }
+    }, 700);
 
     const done = () => { clearTimeout(timeout); clearInterval(ticker); resolve(self.cv); };
     const fail = (msg) => { clearTimeout(timeout); clearInterval(ticker); cvPromise = null; reject(new Error(msg)); };
 
-    // Fake progress ticker while WASM compiles (no real API for this)
-    let fakePct = 14;
-    const ticker = setInterval(() => {
-      if (fakePct < 14) return;
-      fakePct = Math.min(fakePct + 1, 14);
-      self.postMessage({ type: 'progress', progress: fakePct, label: 'Compiling WASM…' });
-    }, 800);
+    self.postMessage({ type: 'progress', progress: 5, label: 'Loading OpenCV…' });
 
-    // Emscripten ≤3.x callback pattern
-    self.Module = {
-      onRuntimeInitialized() { done(); },
-      onAbort(reason) { fail('WASM aborted: ' + reason); },
-    };
+    try {
+      importScripts(OPENCV_URL);
+    } catch (e) {
+      fail('importScripts failed: ' + e.message);
+      return;
+    }
 
-    fetchWithProgress(OPENCV_URL)
-      .then(code => {
-        self.postMessage({ type: 'progress', progress: 13, label: 'Executing OpenCV script…' });
-        // Pass undefined for module/define so UMD takes the worker/else branch
-        // and assigns root.cv = factory() where root = this = self
-        // eslint-disable-next-line no-new-func
-        (new Function('module', 'define', code)).call(self, void 0, void 0);
+    self.postMessage({ type: 'progress', progress: 10, label: 'Waiting for WASM…' });
 
-        // Emscripten 3.x+ exposes cv as a thenable — wrap in real Promise
-        if (self.cv && typeof self.cv.then === 'function') {
-          Promise.resolve(self.cv).then(() => done()).catch(e => fail('cv init error: ' + e));
-        } else if (self.cv && self.cv.ready && typeof self.cv.ready.then === 'function') {
-          Promise.resolve(self.cv.ready).then(() => done()).catch(e => fail('cv.ready error: ' + e));
-        } else if (self.cv && self.cv.Mat) {
-          done(); // already synchronously ready
-        }
-        // otherwise wait for onRuntimeInitialized above
-      })
-      .catch(e => fail('Fetch failed: ' + e.message));
+    // self.cv is a thenable in this build — wrap in real Promise to await WASM init
+    if (self.cv && typeof self.cv.then === 'function') {
+      Promise.resolve(self.cv).then(() => done()).catch(e => fail('cv init: ' + e));
+    } else if (self.cv && self.cv.ready) {
+      Promise.resolve(self.cv.ready).then(() => done()).catch(e => fail('cv.ready: ' + e));
+    } else if (self.cv && self.cv.Mat) {
+      done();
+    } else {
+      fail('OpenCV not set after loading — check browser console');
+    }
   });
   return cvPromise;
 }
