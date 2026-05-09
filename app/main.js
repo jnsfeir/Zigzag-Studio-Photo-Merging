@@ -337,15 +337,9 @@ function renderGroups(groups) {
 // ── Merge ─────────────────────────────────────────────────────────────────────
 async function mergeGroup(group, setLabel = '') {
   processingSetLabel.textContent = setLabel.toUpperCase();
-  progressBar.style.width  = '0%';
+  progressBar.style.width  = '2%';
   progressLabel.textContent = 'Preparing…';
   showStep(stepProcessing);
-
-  const hasRaw = group.files.some(isRawFile);
-  if (hasRaw) {
-    progressBar.style.width  = '2%';
-    progressLabel.textContent = 'Decoding RAW files…';
-  }
 
   const [underBuf, normalBuf, overBuf] = await Promise.all(
     group.files.map(f => isRawFile(f) ? decodeRawToBuffer(f) : f.arrayBuffer())
