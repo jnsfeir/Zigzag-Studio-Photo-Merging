@@ -301,12 +301,8 @@ function renderGroups(groups) {
       <div class="group-thumbs">${thumbsHtml}</div>
       <div class="group-card-footer">
         <button class="group-merge-btn"
-          data-tip="Merge with the browser's built-in flambient pipeline">
-          Merge (Browser)
-        </button>
-        <button class="group-ps-btn"
-          data-tip="Send to Photoshop — opens the 3 exposures in PS and runs Auto-Blend Layers for a professional HDR stack">
-          Merge with PS
+          data-tip="Merge these 3 exposures into one flambient image">
+          Merge This Set
         </button>
       </div>`;
 
@@ -314,9 +310,6 @@ function renderGroups(groups) {
       mergeGroup(group, `${group.label} of ${groups.length}`);
     });
 
-    card.querySelector('.group-ps-btn').addEventListener('click', () => {
-      mergeGroupWithPhotoshop(group, `${group.label} of ${groups.length}`);
-    });
 
     // Revoke object URLs when images load to free memory
     card.querySelectorAll('[data-revoke]').forEach(img => {
