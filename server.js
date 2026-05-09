@@ -175,44 +175,36 @@ Write-Host "Inner: done."
 `;
 }
 
-// ── Outer PS1: schedules inner.ps1 via Task Scheduler in the interactive session
+// ── Outer PS1: uses schtasks.exe (avoids WMI permission issues from Node subprocess)
 function buildOuterPs1(innerPs1Path, outputPath) {
   const taskName = `ZZMerge_${randomBytes(4).toString('hex')}`;
-  const safe = (s) => s.replace(/\\/g, '\\\\');
   return `$ErrorActionPreference = 'Stop'
 $taskName   = '${taskName}'
-$innerScript = '${safe(innerPs1Path)}'
-$outputPath  = '${safe(outputPath)}'
+$innerPath  = '${innerPs1Path.replace(/\\/g, '/')}'
+$outputPath = '${outputPath.replace(/\\/g, '/')}'
 
-Write-Host "Outer: registering scheduled task $taskName"
-$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$action      = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \`"$innerScript\`""
-$settings    = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
-$principal   = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Force | Out-Null
+# schtasks.exe uses a different RPC path than the PS cmdlets — works from non-interactive processes
+$tr = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \`"$innerPath\`""
+Write-Host "Outer: creating task $taskName"
+& schtasks.exe /Create /TN $taskName /TR "$tr" /SC ONCE /ST 00:00 /F /IT 2>&1 | Write-Host
+if ($LASTEXITCODE -ne 0) { throw "schtasks create failed (exit $LASTEXITCODE)" }
 
-Write-Host "Outer: starting task..."
-Start-ScheduledTask -TaskName $taskName
+Write-Host "Outer: starting task"
+& schtasks.exe /Run /TN $taskName 2>&1 | Write-Host
+if ($LASTEXITCODE -ne 0) { throw "schtasks run failed (exit $LASTEXITCODE)" }
 
-# Poll until the task finishes or 4-minute deadline
+Write-Host "Outer: polling for output..."
 $deadline = (Get-Date).AddMinutes(4)
-do {
+while (-not (Test-Path $outputPath) -and (Get-Date) -lt $deadline) {
   Start-Sleep -Seconds 3
-  $state = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State
-  Write-Host "Outer: task state = $state"
-} while ($state -eq 'Running' -and (Get-Date) -lt $deadline)
-
-$info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-Write-Host "Outer: last result = $($info.LastTaskResult)"
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-
-if ($info.LastTaskResult -ne 0) {
-  throw "Photoshop task exited with code $($info.LastTaskResult)"
+  Write-Host "Outer: waiting..."
 }
+& schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
+
 if (-not (Test-Path $outputPath)) {
-  throw "Task succeeded but output file not found: $outputPath"
+  throw "Timeout — Photoshop did not produce output within 4 minutes"
 }
-Write-Host "Outer: output confirmed at $outputPath"
+Write-Host "Outer: output confirmed"
 `;
 }
 
