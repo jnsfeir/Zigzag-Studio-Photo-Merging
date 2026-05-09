@@ -1,6 +1,5 @@
-// Flambient pipeline — luminosity-based exposure blending
-// Normal exposure is the base; underexposed patches blown windows;
-// overexposed fills crushed shadows. Masks are blurred to prevent halos.
+// Flambient pipeline — alignment + luminosity-based exposure blending
+// Aligns under/over to normal via two-level correlation pyramid before blending.
 
 function post(type, extra) { self.postMessage({ type, ...extra }); }
 function progress(pct, label) { post('progress', { progress: pct, label }); }
@@ -51,13 +50,101 @@ async function bufToImageData(buf) {
   return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
 }
 
+// ── Alignment ─────────────────────────────────────────────────────────────────
+
+// Box-average downsample to grayscale Float32
+function downsampleGray(imageData, factor) {
+  const { data, width, height } = imageData;
+  const dw = Math.floor(width  / factor);
+  const dh = Math.floor(height / factor);
+  const out = new Float32Array(dw * dh);
+  const f2  = factor * factor;
+  for (let dy = 0; dy < dh; dy++) {
+    for (let dx = 0; dx < dw; dx++) {
+      let sum = 0;
+      for (let fy = 0; fy < factor; fy++) {
+        const row = (dy * factor + fy) * width;
+        for (let fx = 0; fx < factor; fx++) {
+          const p = (row + dx * factor + fx) * 4;
+          sum += 0.2126 * data[p] + 0.7152 * data[p+1] + 0.0722 * data[p+2];
+        }
+      }
+      out[dy * dw + dx] = sum / (f2 * 255);
+    }
+  }
+  return { gray: out, w: dw, h: dh };
+}
+
+// Zero-mean cross-correlation; searches around (cDx, cDy) ± (maxDx, maxDy)
+function findTranslation(ref, src, w, h, cDx, cDy, maxDx, maxDy) {
+  let mu = 0;
+  for (let i = 0; i < w * h; i++) mu += ref[i];
+  mu /= w * h;
+
+  let bestDx = cDx, bestDy = cDy, bestScore = -Infinity;
+
+  for (let dy = cDy - maxDy; dy <= cDy + maxDy; dy++) {
+    for (let dx = cDx - maxDx; dx <= cDx + maxDx; dx++) {
+      let score = 0;
+      const y0 = Math.max(0, dy),  y1 = Math.min(h, h + dy);
+      const x0 = Math.max(0, dx),  x1 = Math.min(w, w + dx);
+      for (let y = y0; y < y1; y++) {
+        const ry = y * w, sy = (y - dy) * w;
+        for (let x = x0; x < x1; x++) {
+          score += (ref[ry + x] - mu) * src[sy + (x - dx)];
+        }
+      }
+      if (score > bestScore) { bestScore = score; bestDx = dx; bestDy = dy; }
+    }
+  }
+  return { dx: bestDx, dy: bestDy };
+}
+
+// Backward-map translation: out[y][x] = src[y-dy][x-dx]
+function applyTranslation(imageData, dx, dy) {
+  if (dx === 0 && dy === 0) return imageData;
+  const { data, width, height } = imageData;
+  const out = new Uint8ClampedArray(data.length);
+  for (let y = 0; y < height; y++) {
+    const sy = y - dy;
+    if (sy < 0 || sy >= height) continue;
+    const rowSrc = sy * width, rowDst = y * width;
+    for (let x = 0; x < width; x++) {
+      const sx = x - dx;
+      if (sx < 0 || sx >= width) continue;
+      const sp = (rowSrc + sx) * 4, dp = (rowDst + x) * 4;
+      out[dp] = data[sp]; out[dp+1] = data[sp+1];
+      out[dp+2] = data[sp+2]; out[dp+3] = data[sp+3];
+    }
+  }
+  return new ImageData(out, width, height);
+}
+
+// Two-level pyramid alignment: coarse at 1/f1, refined at 1/f2
+function alignToRef(src, ref) {
+  const { width, height } = ref;
+  const f1 = Math.max(4, Math.round(width / 500));  // coarse scale
+  const f2 = Math.max(2, Math.round(width / 1000)); // fine scale
+
+  const c1 = downsampleGray(ref, f1), s1 = downsampleGray(src, f1);
+  const coarse = findTranslation(c1.gray, s1.gray, c1.w, c1.h, 0, 0, 10, 10);
+
+  const c2 = downsampleGray(ref, f2), s2 = downsampleGray(src, f2);
+  const cx = Math.round(coarse.dx * f1 / f2);
+  const cy = Math.round(coarse.dy * f1 / f2);
+  const fine = findTranslation(c2.gray, s2.gray, c2.w, c2.h, cx, cy, 4, 4);
+
+  const dx = Math.round(fine.dx * f2);
+  const dy = Math.round(fine.dy * f2);
+  return applyTranslation(src, dx, dy);
+}
+
 // ── Luminosity masks ──────────────────────────────────────────────────────────
 function smoothstep(edge0, edge1, x) {
   const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
   return t * t * (3 - 2 * t);
 }
 
-// Where normal is blown → replace with underexposed
 function buildHighlightMask(imageData) {
   const { data } = imageData;
   const n = data.length / 4;
@@ -69,7 +156,6 @@ function buildHighlightMask(imageData) {
   return mask;
 }
 
-// Where normal is crushed → fill from overexposed
 function buildShadowMask(imageData) {
   const { data } = imageData;
   const n = data.length / 4;
@@ -81,7 +167,6 @@ function buildShadowMask(imageData) {
   return mask;
 }
 
-// Blur a Float32 mask via OffscreenCanvas CSS blur (GPU-accelerated)
 async function blurMask(mask, width, height, sigma) {
   let maxW = 0;
   for (let i = 0; i < mask.length; i++) if (mask[i] > maxW) maxW = mask[i];
@@ -94,7 +179,6 @@ async function blurMask(mask, width, height, sigma) {
     imgData.data[i*4] = imgData.data[i*4+1] = imgData.data[i*4+2] = v;
     imgData.data[i*4+3] = 255;
   }
-
   const src = new OffscreenCanvas(width, height);
   src.getContext('2d').putImageData(imgData, 0, 0);
 
@@ -104,7 +188,7 @@ async function blurMask(mask, width, height, sigma) {
   dCtx.drawImage(src, 0, 0);
 
   const blurred = dCtx.getImageData(0, 0, width, height).data;
-  const result = new Float32Array(mask.length);
+  const result  = new Float32Array(mask.length);
   for (let i = 0; i < result.length; i++) result[i] = blurred[i*4] * invScale;
   return result;
 }
@@ -118,14 +202,10 @@ function blendExposures(imgNormal, imgUnder, imgOver, hiMask, shadMask) {
 
   for (let i = 0; i < n; i++) {
     const p = i * 4;
-    const hi   = hiMask[i];
-    const shad = shadMask[i];
-    // Normalize so hi + shad + base always sums to 1
+    const hi = hiMask[i], shad = shadMask[i];
     const total = hi + shad;
     const s = total > 1 ? 1 / total : 1;
-    const hiN   = hi   * s;
-    const shadN = shad * s;
-    const base  = 1 - hiN - shadN;
+    const hiN = hi * s, shadN = shad * s, base = 1 - hiN - shadN;
 
     out[p]   = dN[p]   * base + dU[p]   * hiN + dO[p]   * shadN;
     out[p+1] = dN[p+1] * base + dU[p+1] * hiN + dO[p+1] * shadN;
@@ -174,22 +254,27 @@ self.onmessage = async (e) => {
       throw new Error('All three images must have the same dimensions.');
     }
 
-    progress(20, 'Building luminosity masks...');
+    progress(15, 'Aligning underexposed...');
+    const alignedUnder = alignToRef(imgUnder, imgNormal);
+
+    progress(28, 'Aligning overexposed...');
+    const alignedOver = alignToRef(imgOver, imgNormal);
+
+    progress(40, 'Building luminosity masks...');
     const rawHi   = buildHighlightMask(imgNormal);
     const rawShad = buildShadowMask(imgNormal);
 
-    progress(35, 'Smoothing masks...');
-    // Larger images get a proportionally larger blur radius to prevent halos
+    progress(52, 'Smoothing masks...');
     const sigma = Math.max(20, Math.round(width / 150));
     const [hiMask, shadMask] = await Promise.all([
       blurMask(rawHi,   width, height, sigma),
       blurMask(rawShad, width, height, sigma),
     ]);
 
-    progress(65, 'Blending exposures...');
-    const blended = blendExposures(imgNormal, imgUnder, imgOver, hiMask, shadMask);
+    progress(68, 'Blending exposures...');
+    const blended = blendExposures(imgNormal, alignedUnder, alignedOver, hiMask, shadMask);
 
-    progress(85, 'Adding clarity...');
+    progress(86, 'Adding clarity...');
     const final = addClarity(blended);
 
     progress(97, 'Finalizing...');
