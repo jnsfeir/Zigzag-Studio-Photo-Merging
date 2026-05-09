@@ -52,12 +52,13 @@ app.post(
 
       const outputPath  = join(tmpDir, 'merged.jpg').replace(/\\/g, '/');
       const jsxPath     = join(tmpDir, 'merge.jsx');
-      const innerPs1    = join(tmpDir, 'inner.ps1');   // runs COM — must be in interactive session
-      const outerPs1    = join(tmpDir, 'outer.ps1');   // schedules inner via Task Scheduler
+      const innerPs1    = join(tmpDir, 'inner.ps1');
+      const outerPs1    = join(tmpDir, 'outer.ps1');
+      const innerLog    = join(LOG_DIR, `inner-${sid}.txt`).replace(/\\/g, '/');
 
       writeFileSync(jsxPath,  buildJsx(filePaths, outputPath));
       writeFileSync(innerPs1, buildInnerPs1(jsxPath.replace(/\\/g, '/'), outputPath));
-      writeFileSync(outerPs1, buildOuterPs1(innerPs1, outputPath));
+      writeFileSync(outerPs1, buildOuterPs1(innerPs1, outputPath, innerLog));
       log('INFO', sid, `Scripts written: jsx, inner.ps1, outer.ps1`);
 
       log('INFO', sid, 'Spawning outer PowerShell (Task Scheduler bridge)…');
@@ -78,12 +79,21 @@ app.post(
       );
       log('INFO', sid, `Session log → logs/session-${sid}.txt`);
 
-      // Check for ExtendScript error sidecar
-      const extErr = existsSync(outputPath + '.error.txt')
-        ? readFileSync(outputPath + '.error.txt', 'utf8').trim() : '';
+      // Log what the scheduled task (inner.ps1) printed
+      if (existsSync(innerLog)) {
+        const innerOut = readFileSync(innerLog, 'utf8').trim();
+        if (innerOut) log('INNER', sid, innerOut);
+      } else {
+        log('INNER', sid, '(no inner log written - task may not have run)');
+      }
+
+      // Check for ExtendScript error sidecar written by the JSX
+      const extErrFile = outputPath + '.error.txt';
+      const extErr = existsSync(extErrFile) ? readFileSync(extErrFile, 'utf8').trim() : '';
+      if (extErr) log('JSX-ERR', sid, extErr);
 
       if (ps.status !== 0 || !existsSync(outputPath)) {
-        throw new Error(extErr || stderr || `Process exited ${ps.status} — no output produced`);
+        throw new Error(extErr || stderr || `Process exited ${ps.status} - no output produced`);
       }
 
       const jpeg = readFileSync(outputPath);
@@ -176,20 +186,21 @@ Write-Host "Inner: done."
 }
 
 // ── Outer PS1: uses schtasks.exe (avoids WMI permission issues from Node subprocess)
-function buildOuterPs1(innerPs1Path, outputPath) {
+function buildOuterPs1(innerPs1Path, outputPath, innerLogPath) {
   const taskName = `ZZMerge_${randomBytes(4).toString('hex')}`;
   return `$ErrorActionPreference = 'Stop'
 $taskName   = '${taskName}'
 $innerPath  = '${innerPs1Path.replace(/\\/g, '/')}'
 $outputPath = '${outputPath.replace(/\\/g, '/')}'
+$innerLog   = '${innerLogPath}'
 
 # schtasks.exe uses a different RPC path - works from non-interactive processes
-$tr = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $innerPath"
-Write-Host "Outer: creating task $taskName"
-& schtasks.exe /Create /TN $taskName /TR $tr /SC ONCE /ST 00:00 /F /IT 2>&1 | Write-Host
-if ($LASTEXITCODE -ne 0) { throw "schtasks create failed (exit $LASTEXITCODE)" }
+$tr = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $innerPath >> $innerLog 2>&1"
+$st = (Get-Date).AddMinutes(2).ToString("HH:mm")
+Write-Host "Outer: creating task $taskName (ST=$st)"
+& schtasks.exe /Create /TN $taskName /TR $tr /SC ONCE /ST $st /F /IT 2>&1 | Write-Host
 
-Write-Host "Outer: starting task"
+Write-Host "Outer: starting task immediately"
 & schtasks.exe /Run /TN $taskName 2>&1 | Write-Host
 if ($LASTEXITCODE -ne 0) { throw "schtasks run failed (exit $LASTEXITCODE)" }
 
