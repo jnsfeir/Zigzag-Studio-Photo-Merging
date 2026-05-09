@@ -1,0 +1,136 @@
+*, *::before, *::after {
+  margin: 0; padding: 0; box-sizing: border-box;
+}
+
+:root {
+  --bg: #070708;
+  --white: #ffffff;
+  --pink: #ff2d78;
+  --cyan: #00ffcc;
+  --yellow: #ffef00;
+  --orange: #ff6b35;
+  --purple: #c084fc;
+}
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  cursor: crosshair;
+}
+
+body.flipped { transform: rotate(180deg); transform-origin: 50% 50%; }
+
+#app {
+  position: relative;
+  width: 100vw; height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Depth atmosphere ───────────────────────────────── */
+#center-glow {
+  position: fixed; inset: 0;
+  pointer-events: none; z-index: 1;
+  background: radial-gradient(
+    ellipse 55% 55% at 50% 44%,
+    rgba(255,255,255,0.028) 0%,
+    rgba(255,255,255,0.008) 45%,
+    transparent 100%
+  );
+}
+
+/* Curved monitor vignette — heavy on sides to echo the physical curve */
+#vignette {
+  position: fixed; inset: 0;
+  pointer-events: none; z-index: 20;
+  background:
+    linear-gradient(90deg,
+      rgba(0,0,0,0.82) 0%,
+      rgba(0,0,0,0.3)  12%,
+      transparent      28%,
+      transparent      72%,
+      rgba(0,0,0,0.3)  88%,
+      rgba(0,0,0,0.82) 100%
+    ),
+    radial-gradient(
+      ellipse 80% 88% at 50% 48%,
+      transparent 42%,
+      rgba(0,0,0,0.35) 72%,
+      rgba(0,0,0,0.72) 100%
+    );
+}
+
+/* ── Rain ────────────────────────────────────────────── */
+#rain-container {
+  position: absolute; inset: 0; overflow: visible;
+}
+
+.drop {
+  position: absolute;
+  top: -300px;
+  white-space: pre;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1.05;
+  will-change: transform, opacity;
+  mix-blend-mode: screen;
+}
+
+.drop:hover { z-index: 100; }
+
+/* ── Hint ─────────────────────────────────────────────── */
+#hint {
+  position: fixed;
+  bottom: 32px; left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none; z-index: 30;
+}
+#hint span {
+  display: block;
+  font-family: 'Space Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 5px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.18);
+  animation: hintPulse 2.8s ease-in-out infinite;
+}
+@keyframes hintPulse {
+  0%, 100% { opacity: 0.4; }
+  50%       { opacity: 1; letter-spacing: 7px; }
+}
+
+/* ── Ripple ───────────────────────────────────────────── */
+.ripple {
+  position: fixed;
+  border-radius: 50%;
+  pointer-events: none; z-index: 15;
+  transform: translate(-50%, -50%) scale(0);
+  border: 1.5px solid rgba(255,255,255,0.55);
+}
+
+/* ── Toast ────────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  bottom: 52px; left: 50%;
+  transform: translateX(-50%);
+  background: #fff;
+  color: #070708;
+  font-family: 'Bebas Neue', cursive;
+  font-size: 30px;
+  padding: 9px 34px 7px;
+  letter-spacing: 7px;
+  z-index: 9999;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* ── Disco ────────────────────────────────────────────── */
+@keyframes disco {
+  0%   { filter: hue-rotate(0deg)   saturate(3.5) brightness(1.25); }
+  25%  { filter: hue-rotate(90deg)  saturate(5)   brightness(1.7);  }
+  50%  { filter: hue-rotate(180deg) saturate(3.5) brightness(1.25); }
+  75%  { filter: hue-rotate(270deg) saturate(5)   brightness(1.7);  }
+  100% { filter: hue-rotate(360deg) saturate(3.5) brightness(1.25); }
+}
+body.disco { animation: disco 0.22s linear infinite; }

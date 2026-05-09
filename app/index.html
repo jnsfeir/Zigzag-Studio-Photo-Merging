@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zigzag Studio — Photo Merge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="logo">
+      <span class="logo-zz">ZZ</span>
+      <span class="logo-text">ZIGZAG STUDIO</span>
+    </div>
+    <div class="header-title">Photo Merge</div>
+    <div class="header-mode">
+      <button class="mode-btn active" data-mode="batch"
+        data-tip="Batch mode — drop or select multiple photos and the app auto-detects which ones are from the same bracketed sequence">Batch</button>
+      <button class="mode-btn" data-mode="manual"
+        data-tip="Manual mode — you have 3 specific photos already sorted; drop them directly into the Underexposed / Normal / Overexposed slots">Manual</button>
+    </div>
+  </header>
+
+  <!-- ── IMPORT STEP ───────────────────────────────────────────────────────── -->
+  <section id="step-import" class="step active">
+    <div class="import-zone" id="import-zone">
+      <!-- Single input: no webkitdirectory so the OS picker lets you pick files OR navigate into a folder and select all -->
+      <input type="file" id="file-picker" multiple accept="image/jpeg,image/jpg,image/png,image/tiff" style="display:none" />
+      <div class="import-icon">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      </div>
+      <div class="import-title">Drop your bracket photos here</div>
+      <div class="import-sub">or click to select files from a folder</div>
+      <button class="btn-primary" id="btn-select-files"
+        data-tip="Opens your file browser — navigate to your folder and select all the bracket photos at once (Ctrl+A or Cmd+A to select all). The app will automatically group them into sets of 3 by timestamp and exposure.">
+        Choose Files
+      </button>
+      <div class="import-hint">
+        Accepts JPEG &amp; PNG · groups sets of 3 by timestamp &amp; exposure · drag a folder straight onto this zone
+      </div>
+    </div>
+  </section>
+
+  <!-- ── GROUPS STEP ───────────────────────────────────────────────────────── -->
+  <section id="step-groups" class="step hidden">
+    <div class="groups-header">
+      <div>
+        <div class="groups-title" id="groups-title">Detected bracket sets</div>
+        <div class="groups-sub" id="groups-sub"></div>
+      </div>
+      <div class="groups-header-actions">
+        <button class="btn-ghost btn-sm" id="btn-back-import"
+          data-tip="Go back to the import screen to add more photos — existing sets stay in memory">← Import More</button>
+        <button class="btn-primary" id="btn-merge-all"
+          data-tip="Run the flambient pipeline on every set shown below, one after the other — when done you can browse all results and download each one">Merge All Sets</button>
+      </div>
+    </div>
+    <div class="groups-grid" id="groups-grid"></div>
+    <div id="ungrouped-section" class="hidden">
+      <div class="section-label">Ungrouped images (need manual assignment)</div>
+      <div class="ungrouped-grid" id="ungrouped-grid"></div>
+    </div>
+  </section>
+
+  <!-- ── MANUAL STEP ───────────────────────────────────────────────────────── -->
+  <section id="step-manual" class="step hidden">
+    <div class="upload-grid">
+      <div class="slot" data-slot="under"
+        data-tip="Your darkest shot — taken at −2 EV (or similar). Preserves highlight detail in bright areas like windows. Drop a file here or click to browse.">
+        <input type="file" accept="image/jpeg,image/png" class="file-input" />
+        <div class="slot-inner">
+          <div class="slot-label">UNDEREXPOSED</div>
+          <div class="slot-ev">−2 EV</div>
+          <div class="slot-drop-zone"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><span>Drop or click</span></div>
+          <div class="slot-preview hidden"><img class="thumb" /><div class="exif-info"></div><button class="remove-btn" data-tip="Remove this image">✕</button></div>
+        </div>
+      </div>
+      <div class="slot" data-slot="normal"
+        data-tip="Your balanced ambient shot — the base exposure. This is the reference frame used in the before/after comparison on the result screen.">
+        <input type="file" accept="image/jpeg,image/png" class="file-input" />
+        <div class="slot-inner">
+          <div class="slot-label">NORMAL</div>
+          <div class="slot-ev">0 EV</div>
+          <div class="slot-drop-zone"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><span>Drop or click</span></div>
+          <div class="slot-preview hidden"><img class="thumb" /><div class="exif-info"></div><button class="remove-btn" data-tip="Remove this image">✕</button></div>
+        </div>
+      </div>
+      <div class="slot" data-slot="over"
+        data-tip="Your brightest shot — taken at +2 EV (or similar). Recovers shadow and interior detail that would be lost in the darker frames.">
+        <input type="file" accept="image/jpeg,image/png" class="file-input" />
+        <div class="slot-inner">
+          <div class="slot-label">OVEREXPOSED</div>
+          <div class="slot-ev">+2 EV</div>
+          <div class="slot-drop-zone"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><span>Drop or click</span></div>
+          <div class="slot-preview hidden"><img class="thumb" /><div class="exif-info"></div><button class="remove-btn" data-tip="Remove this image">✕</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="merge-bar">
+      <div id="manual-error-msg" class="error-msg hidden"></div>
+      <button id="btn-manual-merge" class="btn-primary" disabled
+        data-tip="All 3 slots must be filled before merging — the flambient pipeline will white-balance, align, and blend the three exposures">Merge</button>
+    </div>
+  </section>
+
+  <!-- ── PROCESSING STEP ──────────────────────────────────────────────────── -->
+  <section id="step-processing" class="step hidden">
+    <div class="processing-card">
+      <div class="processing-set-label" id="processing-set-label"></div>
+      <div class="processing-title">Merging…</div>
+      <div class="progress-bar-wrap"><div id="progress-bar" class="progress-bar"></div></div>
+      <div id="progress-label" class="progress-label">Loading OpenCV…</div>
+      <button id="btn-cancel" class="btn-ghost"
+        data-tip="Stop the current merge and return to the sets view — already completed results are kept">Cancel</button>
+    </div>
+  </section>
+
+  <!-- ── RESULT STEP ───────────────────────────────────────────────────────── -->
+  <section id="step-result" class="step hidden">
+    <div class="result-layout">
+      <div class="result-preview-wrap">
+        <div class="compare-container" id="compare-container"
+          data-tip="Left of the line: flambient merge result. Right of the line: your original normal-exposure shot. Drag the handle left or right to compare.">
+          <canvas id="canvas-result"></canvas>
+          <canvas id="canvas-original" class="compare-overlay"></canvas>
+          <div class="compare-divider" id="compare-divider"><div class="divider-handle"></div></div>
+        </div>
+        <div class="compare-hint">Drag the line to compare merged result vs original · <span id="result-label"></span></div>
+      </div>
+      <div class="result-sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-title">Tone Fine-Tune</div>
+          <label class="slider-group"
+            data-tip="Nudge the overall lightness of the merged image. The flambient pipeline already auto-balances the three exposures — use this only for a final creative push.">
+            <span>Brightness</span><input type="range" id="adj-brightness" min="-100" max="100" step="1" value="0" /><span class="slider-val">0</span></label>
+          <label class="slider-group"
+            data-tip="Controls the gap between the darkest and lightest areas. Pull left for a softer, more editorial look; push right for more punch — careful not to clip shadows or highlights.">
+            <span>Contrast</span><input type="range" id="adj-contrast" min="-100" max="100" step="1" value="0" /><span class="slider-val">0</span></label>
+          <label class="slider-group"
+            data-tip="Colour richness. The pipeline applies a natural flambient baseline — a small boost (+10–20) works well if the room has warm tones you want to emphasise.">
+            <span>Saturation</span><input type="range" id="adj-saturation" min="-100" max="100" step="1" value="0" /><span class="slider-val">0</span></label>
+          <button id="btn-reset-adj" class="btn-ghost btn-sm"
+            data-tip="Set all three sliders back to 0 — back to the raw flambient pipeline output">Reset</button>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-title">Export</div>
+          <label class="option-group"
+            data-tip="JPEG — smaller file, ideal for client delivery, web galleries, and print labs. PNG — pixel-perfect lossless, use if you're taking this into Lightroom or Photoshop for further editing.">
+            <span class="option-label">Format</span><select id="export-format" class="select"><option value="jpeg">JPEG</option><option value="png">PNG</option></select></label>
+          <label class="slider-group" id="quality-group"
+            data-tip="JPEG compression level. 92 is the sweet spot for real estate delivery — visually identical to 100 but roughly half the file size. Only go lower if upload speed matters.">
+            <span>Quality</span><input type="range" id="export-quality" min="60" max="100" step="1" value="92" /><span class="slider-val">92</span></label>
+          <button id="btn-download" class="btn-primary"
+            data-tip="Download the merged photo with your tone adjustments baked in — the filename includes the set name so batch exports stay organised">Download</button>
+        </div>
+        <div class="result-nav">
+          <button id="btn-prev-result" class="btn-ghost btn-sm" disabled
+            data-tip="Show the previous merged photo — each result comes from a different bracket set">← Prev</button>
+          <span id="result-counter" class="result-counter"></span>
+          <button id="btn-next-result" class="btn-ghost btn-sm" disabled
+            data-tip="Show the next merged photo — use Download on each one before moving on">Next →</button>
+        </div>
+        <button id="btn-back-groups" class="btn-ghost"
+          data-tip="Return to the detected sets screen — you can merge individual sets again or add more photos">← Back to Sets</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
