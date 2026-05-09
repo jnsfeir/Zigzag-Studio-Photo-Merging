@@ -12,17 +12,26 @@ let cvPromise = null;
 
 function loadCV() {
   if (cvPromise) return cvPromise;
-  cvPromise = (async () => {
+  cvPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cvPromise = null;
+      reject(new Error('OpenCV load timeout'));
+    }, 60000);
+    // Must set self.Module BEFORE importScripts so the UMD factory picks it up
+    self.Module = {
+      onRuntimeInitialized() {
+        clearTimeout(timeout);
+        resolve(self.cv);
+      },
+    };
     try {
       importScripts(OPENCV_URL);
-      // OpenCV.js 4.8 exports a factory function — call it and await the thenable
-      const instance = await cv();
-      return instance;
     } catch (e) {
-      cvPromise = null; // allow retry
-      throw e;
+      clearTimeout(timeout);
+      cvPromise = null;
+      reject(e);
     }
-  })();
+  });
   return cvPromise;
 }
 
