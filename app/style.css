@@ -456,6 +456,17 @@ header {
 .option-label { font-size: 12px; font-weight: 500; color: var(--text2); white-space: nowrap; }
 .hidden { display: none !important; }
 
+/* AI Color reason box */
+.ai-reason {
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.6;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: var(--rsm);
+}
+
 /* Queue badge on merge-all button */
 .queue-badge {
   display: inline-block;

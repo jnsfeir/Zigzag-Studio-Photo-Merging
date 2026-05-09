@@ -8,6 +8,7 @@ let results        = [];   // merged ImageData objects + source label
 let currentResult  = 0;
 let worker         = null;
 let currentMode    = 'batch';
+const aiColorBase  = new Map(); // result index → AI per-channel corrected ImageData
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const stepImport     = document.getElementById('step-import');
@@ -52,6 +53,9 @@ const btnDownload     = document.getElementById('btn-download');
 
 const btnManualMerge  = document.getElementById('btn-manual-merge');
 const manualErrorMsg  = document.getElementById('manual-error-msg');
+
+const btnAiColor    = document.getElementById('btn-ai-color');
+const aiColorReason = document.getElementById('ai-color-reason');
 
 // ── Mode toggle ───────────────────────────────────────────────────────────────
 document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -459,6 +463,7 @@ async function mergeGroupWithPhotoshop(group, setLabel = '') {
 btnMergeAll.addEventListener('click', () => {
   if (detectedGroups.length === 0) return;
   results = [];
+  aiColorBase.clear();
   mergeQueue = [...detectedGroups.slice(1)];
   mergeGroup(detectedGroups[0], `${detectedGroups[0].label} · ${detectedGroups.length} total`);
 });
@@ -594,6 +599,7 @@ btnManualMerge.addEventListener('click', () => {
     label: 'Manual Merge',
   };
   results = [];
+  aiColorBase.clear();
   mergeGroup(group, 'Manual Merge');
 });
 
@@ -644,30 +650,95 @@ function applyToneAdjustments() {
   const contrastF = 1 + c / 100;
   const satF      = 1 + s / 100;
 
-  const { width, height, imageData } = r;
-  canvasResult.width  = imageData.width;
-  canvasResult.height = imageData.height;
+  const source = aiColorBase.get(currentResult) || r.imageData;
+  canvasResult.width  = source.width;
+  canvasResult.height = source.height;
 
   const ctx = canvasResult.getContext('2d');
-  ctx.putImageData(imageData, 0, 0);
+  ctx.putImageData(source, 0, 0);
 
   // Redraw with filter via OffscreenCanvas
-  const tmp = new OffscreenCanvas(imageData.width, imageData.height);
+  const tmp = new OffscreenCanvas(source.width, source.height);
   const tCtx = tmp.getContext('2d');
   tCtx.filter = `brightness(${brightF}) contrast(${contrastF}) saturate(${satF})`;
   tCtx.drawImage(canvasResult, 0, 0);
-  ctx.clearRect(0, 0, imageData.width, imageData.height);
+  ctx.clearRect(0, 0, source.width, source.height);
   ctx.drawImage(tmp, 0, 0);
 }
 
 [adjBrightness, adjContrast, adjSaturation].forEach(s => s.addEventListener('input', applyToneAdjustments));
+
+function applyAiColorCorrection({ r_scale = 1, g_scale = 1, b_scale = 1, brightness = 0, contrast = 0, saturation = 0, reason = '' }) {
+  const r = results[currentResult];
+  if (!r) return;
+  const { data, width, height } = r.imageData;
+  const corrected = new Uint8ClampedArray(data.length);
+  for (let i = 0; i < data.length; i += 4) {
+    corrected[i]   = Math.min(255, Math.max(0, Math.round(data[i]   * r_scale)));
+    corrected[i+1] = Math.min(255, Math.max(0, Math.round(data[i+1] * g_scale)));
+    corrected[i+2] = Math.min(255, Math.max(0, Math.round(data[i+2] * b_scale)));
+    corrected[i+3] = data[i+3];
+  }
+  aiColorBase.set(currentResult, new ImageData(corrected, width, height));
+  adjBrightness.value = String(Math.round(brightness));
+  adjContrast.value   = String(Math.round(contrast));
+  adjSaturation.value = String(Math.round(saturation));
+  document.querySelectorAll('#step-result .slider-val').forEach(v => {
+    const inp = v.previousElementSibling;
+    if (inp?.type === 'range') v.textContent = inp.value;
+  });
+  if (reason) {
+    aiColorReason.textContent = reason;
+    aiColorReason.classList.remove('hidden');
+  }
+  applyToneAdjustments();
+}
 
 btnResetAdj.addEventListener('click', () => {
   adjBrightness.value = adjContrast.value = adjSaturation.value = '0';
   document.querySelectorAll('#step-result .slider-val').forEach(v => {
     if (v.previousElementSibling?.type === 'range') v.textContent = '0';
   });
+  aiColorBase.delete(currentResult);
+  aiColorReason.textContent = '';
+  aiColorReason.classList.add('hidden');
   applyToneAdjustments();
+});
+
+btnAiColor.addEventListener('click', async () => {
+  btnAiColor.disabled = true;
+  btnAiColor.textContent = 'Analyzing…';
+  aiColorReason.textContent = '';
+  aiColorReason.classList.add('hidden');
+
+  try {
+    const tmp = document.createElement('canvas');
+    const maxW = 768;
+    const scale = Math.min(1, maxW / canvasResult.width, maxW / canvasResult.height);
+    tmp.width  = Math.round(canvasResult.width  * scale);
+    tmp.height = Math.round(canvasResult.height * scale);
+    tmp.getContext('2d').drawImage(canvasResult, 0, 0, tmp.width, tmp.height);
+    const b64 = tmp.toDataURL('image/jpeg', 0.88).split(',')[1];
+
+    const resp = await fetch('/api/color-analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: b64 }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({ error: resp.statusText }));
+      throw new Error(body.error || `HTTP ${resp.status}`);
+    }
+    const params = await resp.json();
+    applyAiColorCorrection(params);
+
+  } catch (err) {
+    aiColorReason.textContent = 'AI color fix unavailable: ' + err.message;
+    aiColorReason.classList.remove('hidden');
+  } finally {
+    btnAiColor.disabled = false;
+    btnAiColor.textContent = 'Analyze & Fix Colors';
+  }
 });
 
 btnPrevResult.addEventListener('click', () => { currentResult--; displayResult(currentResult); resetCompareDivider(); });

@@ -1,3 +1,4 @@
+import Anthropic from '@anthropic-ai/sdk';
 import express from 'express';
 import multer from 'multer';
 import { spawnSync } from 'child_process';
@@ -18,8 +19,9 @@ function log(level, sid, msg) {
   try { appendFileSync(LOG_FILE, line + '\n'); } catch {}
 }
 
-const app    = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
+const app      = express();
+const upload   = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
+const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
 app.post(
   '/api/merge-photoshop',
@@ -218,6 +220,67 @@ if (-not (Test-Path $outputPath)) {
 Write-Host "Outer: output confirmed"
 `;
 }
+
+// ── AI color analysis ─────────────────────────────────────────────────────────
+app.post('/api/color-analyze', express.json({ limit: '5mb' }), async (req, res) => {
+  const sid = randomBytes(4).toString('hex');
+
+  if (!anthropic) {
+    return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set. Set it in your terminal before starting the server.' });
+  }
+
+  const { image } = req.body;
+  if (!image || typeof image !== 'string') {
+    return res.status(400).json({ error: 'Missing image field' });
+  }
+
+  log('INFO', sid, 'Color analysis request');
+
+  try {
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: image } },
+          { type: 'text', text: `You are a professional color grading AI for real estate photography.
+
+Analyze this real estate photo and return optimal color correction parameters.
+
+Common issues: tungsten/warm LED lights cause orange cast (lower r_scale, raise b_scale). Daylight only = blue cast (opposite). Fluorescent = slight green (lower g_scale). Mixed lighting is most common.
+
+Respond with ONLY a valid JSON object, no other text:
+{"r_scale":1.0,"g_scale":1.0,"b_scale":1.0,"brightness":0,"contrast":0,"saturation":0,"reason":""}
+
+Rules: r/g/b_scale range 0.85-1.15 only. brightness/contrast/saturation -30 to +30 only. Be conservative — subtle is professional, heavy is fake. reason: one sentence describing the main issue corrected.` }
+        ]
+      }]
+    });
+
+    const text = msg.content[0].text.trim();
+    log('INFO', sid, `AI response: ${text}`);
+
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No JSON in AI response');
+    const p = JSON.parse(match[0]);
+
+    const clamp = (v, lo, hi, def) => typeof v === 'number' && isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def;
+    res.json({
+      r_scale:    clamp(p.r_scale,    0.80, 1.20, 1.0),
+      g_scale:    clamp(p.g_scale,    0.80, 1.20, 1.0),
+      b_scale:    clamp(p.b_scale,    0.80, 1.20, 1.0),
+      brightness: clamp(p.brightness, -50,  50,   0),
+      contrast:   clamp(p.contrast,   -50,  50,   0),
+      saturation: clamp(p.saturation, -50,  50,   0),
+      reason:     typeof p.reason === 'string' ? p.reason : '',
+    });
+
+  } catch (err) {
+    log('ERROR', sid, `Color analysis failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.listen(3001, () => {
   log('INFO', 'startup', 'Photoshop bridge ready → http://localhost:3001');

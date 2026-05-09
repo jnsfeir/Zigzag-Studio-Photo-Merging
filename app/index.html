@@ -148,6 +148,15 @@
             data-tip="Set all three sliders back to 0 — back to the raw flambient pipeline output">Reset</button>
         </div>
         <div class="sidebar-section">
+          <div class="sidebar-title">AI Color</div>
+          <button id="btn-ai-color" class="btn-primary" style="width:100%"
+            data-tip="Sends the photo to Claude AI which detects white balance issues, color casts, and mixed-lighting problems, then predicts and applies the exact corrections for this scene.">
+            Analyze &amp; Fix Colors
+          </button>
+          <div id="ai-color-reason" class="ai-reason hidden"></div>
+        </div>
+
+        <div class="sidebar-section">
           <div class="sidebar-title">Export</div>
           <label class="option-group"
             data-tip="JPEG — smaller file, ideal for client delivery, web galleries, and print labs. PNG — pixel-perfect lossless, use if you're taking this into Lightroom or Photoshop for further editing.">
