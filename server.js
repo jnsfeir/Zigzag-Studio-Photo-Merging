@@ -166,7 +166,7 @@ if (-not $running) {
 
   # 2) Scan Program Files
   if (-not $psExe) {
-    $dirs = Get-ChildItem "${env:ProgramFiles}\\Adobe" -Filter "Adobe Photoshop*" -ErrorAction SilentlyContinue |
+    $dirs = Get-ChildItem "\${env:ProgramFiles}\\Adobe" -Filter "Adobe Photoshop*" -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending
     foreach ($d in $dirs) {
       $exe = Join-Path $d.FullName "Photoshop.exe"
