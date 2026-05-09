@@ -668,6 +668,80 @@ function applyToneAdjustments() {
 
 [adjBrightness, adjContrast, adjSaturation].forEach(s => s.addEventListener('input', applyToneAdjustments));
 
+function analyzeColors(imageData) {
+  const { data } = imageData;
+  const n = data.length / 4;
+  const step = Math.max(1, Math.floor(n / 120000)); // sample ~120k pixels max
+
+  let rNeutral = 0, gNeutral = 0, bNeutral = 0, neutralCount = 0;
+  let rAll = 0, gAll = 0, bAll = 0, sampleCount = 0;
+  const lumSamples = [];
+
+  for (let i = 0; i < n; i += step) {
+    const p = i * 4;
+    const r = data[p]   / 255;
+    const g = data[p+1] / 255;
+    const b = data[p+2] / 255;
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+    rAll += r; gAll += g; bAll += b; sampleCount++;
+    lumSamples.push(lum);
+
+    // Near-neutral pixels (white walls, gray surfaces) = best WB reference
+    if (lum >= 0.18 && lum <= 0.88) {
+      const mean = (r + g + b) / 3;
+      const maxDev = Math.max(Math.abs(r-mean), Math.abs(g-mean), Math.abs(b-mean));
+      if (maxDev < 0.07) { rNeutral += r; gNeutral += g; bNeutral += b; neutralCount++; }
+    }
+  }
+
+  let r_scale = 1, g_scale = 1, b_scale = 1, reason = '';
+
+  if (neutralCount >= 50) {
+    const rM = rNeutral / neutralCount;
+    const gM = gNeutral / neutralCount;
+    const bM = bNeutral / neutralCount;
+    const lM = (rM + gM + bM) / 3;
+    r_scale = lM / rM;
+    g_scale = lM / gM;
+    b_scale = lM / bM;
+
+    if      (r_scale < 0.95 && b_scale > 1.03) reason = 'Warm orange cast (tungsten/LED) detected — white balance cooled';
+    else if (r_scale > 1.03 && b_scale < 0.95) reason = 'Cool blue cast (daylight) detected — white balance warmed';
+    else if (g_scale < 0.96)                    reason = 'Green tint (fluorescent) detected — corrected';
+    else if (Math.abs(r_scale-1) < 0.02 && Math.abs(g_scale-1) < 0.02 && Math.abs(b_scale-1) < 0.02)
+                                                reason = 'Colors look well-balanced — no correction needed';
+    else                                        reason = 'Minor color cast corrected using neutral surfaces';
+  } else {
+    // Gray world fallback
+    const rA = rAll / sampleCount, gA = gAll / sampleCount, bA = bAll / sampleCount;
+    const lA = (rA + gA + bA) / 3;
+    r_scale = lA / rA; g_scale = 1; b_scale = lA / bA;
+    reason = 'Colors adjusted using scene average';
+  }
+
+  r_scale = Math.max(0.85, Math.min(1.15, r_scale));
+  g_scale = Math.max(0.85, Math.min(1.15, g_scale));
+  b_scale = Math.max(0.85, Math.min(1.15, b_scale));
+
+  // Brightness from median luminance, contrast from interquartile spread
+  lumSamples.sort((a, b) => a - b);
+  const med  = lumSamples[Math.floor(lumSamples.length * 0.50)];
+  const p25  = lumSamples[Math.floor(lumSamples.length * 0.25)];
+  const p75  = lumSamples[Math.floor(lumSamples.length * 0.75)];
+  const spread = p75 - p25;
+
+  let brightness = 0, contrast = 0, saturation = 0;
+  if (med < 0.38)    brightness = Math.round((0.42 - med)    * 80);
+  else if (med > 0.58) brightness = Math.round((0.52 - med)  * 60);
+  if (spread < 0.28) contrast   = Math.round((0.32 - spread) * 70);
+
+  brightness = Math.max(-30, Math.min(30, brightness));
+  contrast   = Math.max(-30, Math.min(30, contrast));
+
+  return { r_scale, g_scale, b_scale, brightness, contrast, saturation, reason };
+}
+
 function applyAiColorCorrection({ r_scale = 1, g_scale = 1, b_scale = 1, brightness = 0, contrast = 0, saturation = 0, reason = '' }) {
   const r = results[currentResult];
   if (!r) return;
@@ -705,40 +779,25 @@ btnResetAdj.addEventListener('click', () => {
   applyToneAdjustments();
 });
 
-btnAiColor.addEventListener('click', async () => {
+btnAiColor.addEventListener('click', () => {
+  const r = results[currentResult];
+  if (!r) return;
+
   btnAiColor.disabled = true;
   btnAiColor.textContent = 'Analyzing…';
   aiColorReason.textContent = '';
   aiColorReason.classList.add('hidden');
 
-  try {
-    const tmp = document.createElement('canvas');
-    const maxW = 768;
-    const scale = Math.min(1, maxW / canvasResult.width, maxW / canvasResult.height);
-    tmp.width  = Math.round(canvasResult.width  * scale);
-    tmp.height = Math.round(canvasResult.height * scale);
-    tmp.getContext('2d').drawImage(canvasResult, 0, 0, tmp.width, tmp.height);
-    const b64 = tmp.toDataURL('image/jpeg', 0.88).split(',')[1];
-
-    const resp = await fetch('/api/color-analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: b64 }),
-    });
-    if (!resp.ok) {
-      const body = await resp.json().catch(() => ({ error: resp.statusText }));
-      throw new Error(body.error || `HTTP ${resp.status}`);
+  // Defer so the button state renders before computation starts
+  setTimeout(() => {
+    try {
+      const params = analyzeColors(r.imageData);
+      applyAiColorCorrection(params);
+    } finally {
+      btnAiColor.disabled = false;
+      btnAiColor.textContent = 'Analyze & Fix Colors';
     }
-    const params = await resp.json();
-    applyAiColorCorrection(params);
-
-  } catch (err) {
-    aiColorReason.textContent = 'AI color fix unavailable: ' + err.message;
-    aiColorReason.classList.remove('hidden');
-  } finally {
-    btnAiColor.disabled = false;
-    btnAiColor.textContent = 'Analyze & Fix Colors';
-  }
+  }, 16);
 });
 
 btnPrevResult.addEventListener('click', () => { currentResult--; displayResult(currentResult); resetCompareDivider(); });
