@@ -188,7 +188,7 @@ Write-Host "Outer: registering scheduled task $taskName"
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action      = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \`"$innerScript\`""
 $settings    = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
-$principal   = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
+$principal   = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Force | Out-Null
 
 Write-Host "Outer: starting task..."
